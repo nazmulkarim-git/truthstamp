@@ -46,7 +46,7 @@ async def admin_case_detail(case_id: str, request: Request, pool: Pool = Depends
     ev = await db.list_evidence(pool, case_id)
     events = await db.list_events(pool, case_id)
     return {"case": c, "evidence": ev, "events": events}
-mport os
+import os
 import json
 import tempfile
 import traceback
