@@ -4,20 +4,20 @@ import tempfile
 import traceback
 import datetime
 import pathlib
-from typing import Optional
-
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form, Request, Depends
-from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr, Field
-import jwt
 import hashlib
 import hmac
 import secrets
+from typing import Optional, Any, Dict, List
+
+import jwt
+from asyncpg import Pool
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form, Request, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from . import db
 from . import emailer
-
 from .config import MAX_MB
 from .models import (
     AnalysisResult,
@@ -42,9 +42,6 @@ from .engine import (
     metadata_consistency,
     metadata_completeness,
 )
-from .report import build_pdf_report
-from asyncpg import Pool
-
 
 # -----------------------------
 # App / CORS
@@ -58,6 +55,7 @@ _origins_raw = os.getenv(
 origins = [o.strip() for o in _origins_raw.split(",") if o.strip()]
 if "*" in origins:
     origins = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -66,67 +64,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/admin/overview")
-async def admin_overview(request: Request, pool: Pool = Depends(get_pool)):
-    require_admin(request)
-    counts = await db.counts_overview(pool)
-    recent_events = await db.list_events(pool, case_id=None, limit=50)  # type: ignore
-    # list_events currently expects case_id; we'll implement a fallback below if needed.
-    return {"counts": counts, "recent_events": recent_events}
-
-
-@app.get("/admin/users")
-async def admin_users(request: Request, status: str = "all", pool: Pool = Depends(get_pool)):
-    require_admin(request)
-    users = await db.list_users(pool, status=status, limit=500)
-    return {"users": users}
-
-
-@app.post("/admin/users/{user_id}/disable")
-async def admin_disable_user(user_id: str, request: Request, pool: Pool = Depends(get_pool)):
-    require_admin(request)
-    await db.set_user_active(pool, user_id, False)
-    return {"ok": True}
-
-
-@app.post("/admin/users/{user_id}/enable")
-async def admin_enable_user(user_id: str, request: Request, pool: Pool = Depends(get_pool)):
-    require_admin(request)
-    await db.set_user_active(pool, user_id, True)
-    return {"ok": True}
-
-
-@app.get("/admin/cases")
-async def admin_cases(request: Request, pool: Pool = Depends(get_pool)):
-    require_admin(request)
-    cases = await db.list_cases(pool, user_id=None, limit=500)  # type: ignore
-    return {"cases": cases}
-
-
-@app.get("/admin/cases/{case_id}")
-async def admin_case_detail(case_id: str, request: Request, pool: Pool = Depends(get_pool)):
-    require_admin(request)
-    c = await db.get_case(pool, case_id)
-    if not c:
-        raise HTTPException(status_code=404, detail="Case not found")
-    ev = await db.list_evidence(pool, case_id)
-    events = await db.list_events(pool, case_id)
-    return {"case": c, "evidence": ev, "events": events}
-
-
+# -----------------------------
+# Database
+# -----------------------------
 @app.on_event("startup")
 async def _startup():
-    # Database pool (Postgres). Required for auth + cases.
     app.state.pool = await db.create_pool()
     await db.init_db(app.state.pool)
-
 
 @app.on_event("shutdown")
 async def _shutdown():
     pool = getattr(app.state, "pool", None)
     if pool:
         await pool.close()
-
 
 def get_pool() -> Pool:
     pool = getattr(app.state, "pool", None)
@@ -135,23 +85,99 @@ def get_pool() -> Pool:
     return pool
 
 # -----------------------------
-# Auth (PBKDF2-HMAC-SHA256)
+# Admin auth (header x-admin-key)
+# -----------------------------
+ADMIN_API_KEY = os.getenv("TRUTHSTAMP_ADMIN_API_KEY", "")
+
+def require_admin(request: Request) -> None:
+    if not ADMIN_API_KEY:
+        raise HTTPException(status_code=500, detail="Admin API key not configured")
+    key = request.headers.get("x-admin-key") or request.headers.get("X-Admin-Key")
+    if not key or not hmac.compare_digest(key.strip(), ADMIN_API_KEY):
+        raise HTTPException(status_code=401, detail="Missing/invalid admin key")
+
+async def _get_case_admin(pool: Pool, case_id: str) -> Optional[Dict[str, Any]]:
+    # Admin needs to fetch any case without user_id filter.
+    import uuid
+    try:
+        cid = uuid.UUID(case_id)
+    except Exception:
+        return None
+    async with pool.acquire() as con:
+        row = await con.fetchrow(
+            """
+            SELECT id, user_id, title, description, status, created_at
+            FROM cases
+            WHERE id = $1
+            """,
+            cid,
+        )
+    if not row:
+        return None
+    return {
+        "id": str(row["id"]),
+        "user_id": str(row["user_id"]),
+        "title": row["title"],
+        "description": row["description"],
+        "status": row["status"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
+
+@app.get("/admin/overview")
+async def admin_overview(request: Request, pool: Pool = Depends(get_pool)):
+    require_admin(request)
+    counts = await db.counts_overview(pool)
+    recent_events = await db.list_events(pool, case_id=None, limit=50)
+    return {"counts": counts, "recent_events": recent_events}
+
+@app.get("/admin/users")
+async def admin_users(request: Request, status: str = "all", pool: Pool = Depends(get_pool)):
+    require_admin(request)
+    users = await db.list_users(pool, status=status, limit=500)
+    return {"users": users}
+
+@app.post("/admin/users/{user_id}/disable")
+async def admin_disable_user(user_id: str, request: Request, pool: Pool = Depends(get_pool)):
+    require_admin(request)
+    await db.set_user_active(pool, user_id, False)
+    return {"ok": True}
+
+@app.post("/admin/users/{user_id}/enable")
+async def admin_enable_user(user_id: str, request: Request, pool: Pool = Depends(get_pool)):
+    require_admin(request)
+    await db.set_user_active(pool, user_id, True)
+    return {"ok": True}
+
+@app.get("/admin/cases")
+async def admin_cases(request: Request, pool: Pool = Depends(get_pool)):
+    require_admin(request)
+    cases = await db.list_cases(pool, user_id=None, limit=500)
+    return {"cases": cases}
+
+@app.get("/admin/cases/{case_id}")
+async def admin_case_detail(case_id: str, request: Request, pool: Pool = Depends(get_pool)):
+    require_admin(request)
+    c = await _get_case_admin(pool, case_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="Case not found")
+    ev = await db.list_evidence(pool, case_id)
+    events = await db.list_events(pool, case_id)
+    return {"case": c, "evidence": ev, "events": events}
+
+# -----------------------------
+# Auth (PBKDF2-HMAC-SHA256 + JWT)
 # -----------------------------
 JWT_SECRET = os.getenv("TRUTHSTAMP_JWT_SECRET", "dev-change-me")
 JWT_ALG = "HS256"
 JWT_TTL_HOURS = int(os.getenv("TRUTHSTAMP_JWT_TTL_HOURS", "168"))  # 7 days
 
-
-# Password hashing (PBKDF2) to avoid native deps on slim images.
 # Stored format: pbkdf2_sha256$<iterations>$<salt_hex>$<dk_hex>
 PBKDF2_ITERATIONS = int(os.getenv("TRUTHSTAMP_PBKDF2_ITERS", "200000"))
-
 
 def _hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
     dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS)
     return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt.hex()}${dk.hex()}"
-
 
 def _verify_password(password: str, stored: str) -> bool:
     try:
@@ -166,31 +192,26 @@ def _verify_password(password: str, stored: str) -> bool:
     except Exception:
         return False
 
-
 class AuthIn(BaseModel):
-    email: EmailStr
+    email: str
     password: str
-
 
 class AuthOut(BaseModel):
     token: str
     user: dict
 
-
 class AccessRequestIn(BaseModel):
     name: str = Field(min_length=2, max_length=120)
-    email: EmailStr
+    email: str
     phone: str | None = Field(default=None, max_length=50)
     occupation: str | None = Field(default=None, max_length=120)
     company: str | None = Field(default=None, max_length=200)
     notes: str | None = Field(default=None, max_length=500)
     use_case: str | None = Field(default=None, max_length=200)
 
-
 class ChangePasswordIn(BaseModel):
     old_password: str | None = None
     new_password: str = Field(min_length=8, max_length=200)
-
 
 def _create_token(user_id: str, email: str) -> str:
     now = datetime.datetime.utcnow()
@@ -198,27 +219,20 @@ def _create_token(user_id: str, email: str) -> str:
     payload = {"sub": user_id, "email": email, "iat": int(now.timestamp()), "exp": int(exp.timestamp())}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
-
 def _decode_token(token: str) -> dict:
     return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
 
-
-def get_current_user(request: Request) -> dict:
-    auth = request.headers.get("authorization") or request.headers.get("Authorization")
-    if not auth or not auth.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    token = auth.split(" ", 1)[1].strip()
-    try:
-        payload = _decode_token(token)
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Invalid token payload")
-    # Note: DB lookups are async; this dependency is sync because FastAPI supports
-    # sync deps but they can't await. We'll use an async dep below.
-    raise HTTPException(status_code=500, detail="Misconfigured auth dependency")
-
+def _sanitize_user(u: dict) -> dict:
+    return {
+        "id": u.get("id"),
+        "name": u.get("name"),
+        "email": u.get("email"),
+        "phone": u.get("phone"),
+        "occupation": u.get("occupation"),
+        "company": u.get("company"),
+        "extras": u.get("extras") or {},
+        "must_change_password": bool(u.get("must_change_password")),
+    }
 
 async def get_current_user_async(request: Request, pool: Pool = Depends(get_pool)) -> dict:
     auth = request.headers.get("authorization") or request.headers.get("Authorization")
@@ -232,17 +246,11 @@ async def get_current_user_async(request: Request, pool: Pool = Depends(get_pool
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token payload")
+
     u = await db.get_user_by_id(pool, user_id)
     if not u or not u.get("is_active") or not u.get("is_approved"):
         raise HTTPException(status_code=401, detail="User not active")
     return u
-
-
-def get_optional_user(request: Request) -> Optional[dict]:
-    """Return user dict if Bearer token present/valid, else None."""
-    # kept for compatibility; the async version is used in endpoints
-    return None
-
 
 async def get_optional_user_async(request: Request, pool: Pool = Depends(get_pool)) -> Optional[dict]:
     auth = request.headers.get("authorization") or request.headers.get("Authorization")
@@ -261,36 +269,17 @@ async def get_optional_user_async(request: Request, pool: Pool = Depends(get_poo
     except Exception:
         return None
 
-
-def _sanitize_user(u: dict) -> dict:
-    return {
-        "id": u.get("id"),
-        "name": u.get("name"),
-        "email": u.get("email"),
-        "phone": u.get("phone"),
-        "occupation": u.get("occupation"),
-        "company": u.get("company"),
-        "extras": u.get("extras") or {},
-        "must_change_password": bool(u.get("must_change_password")),
-    }
-
-
-ADMIN_API_KEY = os.getenv("TRUTHSTAMP_ADMIN_API_KEY", "dev-admin-change-me")
-
-
-def require_admin(request: Request) -> None:
-    key = request.headers.get("x-admin-key") or request.headers.get("X-Admin-Key")
-    if not key or not hmac.compare_digest(key.strip(), ADMIN_API_KEY):
-        raise HTTPException(status_code=401, detail="Missing/invalid admin key")
-
-
 @app.post("/auth/register")
 async def register(payload: AccessRequestIn, pool: Pool = Depends(get_pool)):
     """Invite-only registration.
 
     Creates a pending access request. An admin approves and emails a temporary password.
     """
-    existing = await db.get_user_by_email(pool, payload.email)
+    email = (payload.email or "").strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=422, detail="Invalid email")
+
+    existing = await db.get_user_by_email(pool, email)
     if existing:
         if existing.get("is_approved"):
             raise HTTPException(status_code=409, detail="Email already approved. Please log in.")
@@ -300,7 +289,7 @@ async def register(payload: AccessRequestIn, pool: Pool = Depends(get_pool)):
     u = await db.create_access_request(
         pool,
         name=payload.name,
-        email=str(payload.email),
+        email=email,
         phone=payload.phone,
         occupation=payload.occupation,
         company=payload.company,
@@ -308,16 +297,14 @@ async def register(payload: AccessRequestIn, pool: Pool = Depends(get_pool)):
     )
     return {"ok": True, "status": "pending", "user": {"id": u["id"], "email": u["email"]}}
 
-
 @app.post("/auth/request-access")
 async def request_access(payload: AccessRequestIn, pool: Pool = Depends(get_pool)):
-    # Alias so frontend can call either.
     return await register(payload, pool)
-
 
 @app.post("/auth/login", response_model=AuthOut)
 async def login(payload: AuthIn, pool: Pool = Depends(get_pool)):
-    u = await db.get_user_by_email(pool, payload.email)
+    email = (payload.email or "").strip().lower()
+    u = await db.get_user_by_email(pool, email)
     if not u or not u.get("is_approved") or not u.get("is_active"):
         raise HTTPException(status_code=401, detail="Account not approved yet")
     if not u.get("password_hash") or not _verify_password(payload.password, u.get("password_hash") or ""):
@@ -325,15 +312,16 @@ async def login(payload: AuthIn, pool: Pool = Depends(get_pool)):
     token = _create_token(u["id"], u["email"])
     return {"token": token, "user": _sanitize_user(u)}
 
-
 @app.get("/auth/me")
 async def me(user=Depends(get_current_user_async)):
     return _sanitize_user(user)
 
-
 @app.post("/auth/change-password")
-async def change_password(payload: ChangePasswordIn, user=Depends(get_current_user_async), pool: Pool = Depends(get_pool)):
-    # If user is flagged must_change_password, old_password isn't required.
+async def change_password(
+    payload: ChangePasswordIn,
+    user=Depends(get_current_user_async),
+    pool: Pool = Depends(get_pool),
+):
     if not user.get("must_change_password"):
         if not payload.old_password:
             raise HTTPException(status_code=400, detail="old_password required")
@@ -344,28 +332,23 @@ async def change_password(payload: ChangePasswordIn, user=Depends(get_current_us
     await db.set_user_password(pool, user["id"], ph, must_change_password=False)
     return {"ok": True}
 
-
 # -----------------------------
-# Admin: approve pending users (invite-only onboarding)
+# Admin onboarding: approve pending users
 # -----------------------------
-
-
 @app.get("/admin/pending-users")
 async def admin_pending_users(request: Request, pool: Pool = Depends(get_pool)):
     require_admin(request)
     users = await db.list_pending_users(pool, limit=100)
     return [{k: v for k, v in u.items() if k != "password_hash"} for u in users]
 
-
 class ApproveOut(BaseModel):
     ok: bool
     email_sent: bool
 
-
 @app.post("/admin/approve-user/{user_id}", response_model=ApproveOut)
 async def admin_approve_user(user_id: str, request: Request, pool: Pool = Depends(get_pool)):
     require_admin(request)
-    # Generate temp password and email it.
+
     temp_password = secrets.token_urlsafe(9)  # ~12 chars
     ph = _hash_password(temp_password)
     u = await db.approve_user(pool, user_id, password_hash=ph, must_change_password=True)
@@ -389,14 +372,11 @@ async def admin_approve_user(user_id: str, request: Request, pool: Pool = Depend
         except Exception as e:
             print("EMAIL_SEND_ERROR:", repr(e))
 
-    # Always return ok, and whether email was actually sent.
-    # IMPORTANT: In production you probably *shouldn't* return the temp password.
-    # For this YC MVP, you can also read it from logs if SMTP isn't configured.
     if not email_sent:
+        # For MVP: reveal temp password in logs if SMTP isn't configured.
         print("TEMP_PASSWORD_FOR", u["email"], ":", temp_password)
 
     return {"ok": True, "email_sent": email_sent}
-
 
 # -----------------------------
 # Health
@@ -405,10 +385,8 @@ async def admin_approve_user(user_id: str, request: Request, pool: Pool = Depend
 def health():
     return {"ok": True, "service": "truthstamp-api"}
 
-
 def _too_big(nbytes: int) -> bool:
     return nbytes > MAX_MB * 1024 * 1024
-
 
 def _cleanup_file(path: Optional[str]) -> None:
     if not path:
@@ -419,9 +397,8 @@ def _cleanup_file(path: Optional[str]) -> None:
     except Exception:
         pass
 
-
 # -----------------------------
-# Analysis Core
+# Analysis core
 # -----------------------------
 def _analyze_to_model(
     in_path: str,
@@ -429,10 +406,6 @@ def _analyze_to_model(
     role: Optional[str],
     use_case: Optional[str],
     bytes_len: int,
-    case_id: Optional[str] = None,
-    actor: str = "web",
-    request: Optional[Request] = None,
-    evidence_id: Optional[str] = None,
 ) -> AnalysisResult:
     sha = sha256_file(in_path)
     media_type = detect_media_type(in_path)
@@ -455,7 +428,7 @@ def _analyze_to_model(
     model = meta_d.get("EXIF:Model") or meta_d.get("Model")
     sw = meta_d.get("EXIF:Software") or meta_d.get("XMP:CreatorTool") or meta_d.get("Software")
 
-    extra = []
+    extra: List[str] = []
     if make or model:
         extra.append(f"Device metadata suggests capture on: {(make or '').strip()} {(model or '').strip()}".strip())
     if sw:
@@ -483,12 +456,13 @@ def _analyze_to_model(
             value=prov_state,
             confidence="PROVABLE" if prov_state != "UNVERIFIABLE_NO_PROVENANCE" else "INFERRED",
         ),
+        Finding(
+            key="device_make_model",
+            value=(f"{make or ''} {model or ''}".strip() or None),
+            confidence="INFERRED" if (make or model) else "UNKNOWN",
+            notes=None if (make or model) else "No camera Make/Model metadata found.",
+        ),
     ]
-
-    if make or model:
-        findings.append(Finding(key="device_make_model", value=f"{make or ''} {model or ''}".strip(), confidence="INFERRED"))
-    else:
-        findings.append(Finding(key="device_make_model", value=None, confidence="UNKNOWN", notes="No camera Make/Model metadata found."))
 
     return AnalysisResult(
         filename=filename or "upload",
@@ -534,7 +508,9 @@ def _analyze_to_model(
         findings=findings,
     )
 
-
+# -----------------------------
+# Cases (login required)
+# -----------------------------
 @app.post("/cases", response_model=CaseItem)
 async def create_case(
     payload: CaseCreate,
@@ -554,7 +530,6 @@ async def create_case(
     )
     return c
 
-
 @app.get("/cases", response_model=list[CaseItem])
 async def list_cases(
     limit: int = 50,
@@ -564,7 +539,6 @@ async def list_cases(
 ):
     return await db.list_cases(pool, user["id"], limit=limit, offset=offset)
 
-
 @app.get("/cases/{case_id}", response_model=CaseItem)
 async def get_case(case_id: str, user=Depends(get_current_user_async), pool: Pool = Depends(get_pool)):
     c = await db.get_case(pool, user["id"], case_id)
@@ -572,13 +546,11 @@ async def get_case(case_id: str, user=Depends(get_current_user_async), pool: Poo
         raise HTTPException(status_code=404, detail="Case not found")
     return c
 
-
 @app.get("/cases/{case_id}/evidence", response_model=list[EvidenceItem])
 async def list_case_evidence(case_id: str, limit: int = 200, user=Depends(get_current_user_async), pool: Pool = Depends(get_pool)):
     if not await db.get_case(pool, user["id"], case_id):
         raise HTTPException(status_code=404, detail="Case not found")
     return await db.list_evidence(pool, case_id, limit=limit)
-
 
 @app.get("/cases/{case_id}/evidence/{evidence_id}")
 async def get_case_evidence(case_id: str, evidence_id: str, user=Depends(get_current_user_async), pool: Pool = Depends(get_pool)):
@@ -589,16 +561,14 @@ async def get_case_evidence(case_id: str, evidence_id: str, user=Depends(get_cur
         raise HTTPException(status_code=404, detail="Evidence not found")
     return evd
 
-
 @app.get("/cases/{case_id}/events", response_model=list[EventItem])
 async def list_case_events(case_id: str, limit: int = 200, user=Depends(get_current_user_async), pool: Pool = Depends(get_pool)):
     if not await db.get_case(pool, user["id"], case_id):
         raise HTTPException(status_code=404, detail="Case not found")
     return await db.list_events(pool, case_id, limit=limit)
 
-
 # -----------------------------
-# Analysis (public) & Report (login required)
+# Analysis (public) & PDF report (login required)
 # -----------------------------
 @app.post("/analyze", response_model=AnalysisResult)
 async def analyze(
@@ -614,11 +584,10 @@ async def analyze(
     if _too_big(len(contents)):
         raise HTTPException(status_code=413, detail=f"File too large. Max {MAX_MB} MB.")
 
-    # If caller isn't logged in, ignore case_id (guest single-file analysis).
+    # Guests can do quick scan, but can't attach to cases.
     if not user:
         case_id = None
 
-    # validate case belongs to user if provided
     if case_id and user and not await db.get_case(pool, user["id"], case_id):
         raise HTTPException(status_code=404, detail="Case not found")
 
@@ -654,7 +623,6 @@ async def analyze(
 
         return res
 
-
 @app.post("/report")
 async def report(
     request: Request,
@@ -666,8 +634,8 @@ async def report(
     case_id: str | None = Form(default=None),
     pool: Pool = Depends(get_pool),
 ):
-    tmp_in = None
-    tmp_pdf = None
+    tmp_in: Optional[str] = None
+    tmp_pdf: Optional[str] = None
 
     try:
         contents = await file.read()
@@ -687,7 +655,21 @@ async def report(
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as pf:
             tmp_pdf = pf.name
 
-        build_pdf_report(analysis_model.model_dump(), tmp_pdf)
+        # Lazy import so a broken report module doesn't prevent API boot.
+        try:
+            from .report import build_pdf_report  # pylint: disable=import-error
+        except Exception as ie:
+            print("REPORT_IMPORT_ERROR:", repr(ie))
+            raise HTTPException(status_code=500, detail="Report generator not available")
+
+        payload = analysis_model.model_dump()
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                raise HTTPException(status_code=500, detail="Invalid analysis payload")
+
+        build_pdf_report(payload, tmp_pdf)
 
         if case_id:
             evd = await db.add_evidence(
@@ -714,7 +696,6 @@ async def report(
 
         background_tasks.add_task(_cleanup_file, tmp_in)
         background_tasks.add_task(_cleanup_file, tmp_pdf)
-
         return FileResponse(tmp_pdf, media_type="application/pdf", filename="truthstamp-report.pdf")
 
     except HTTPException:
@@ -729,20 +710,20 @@ async def report(
         background_tasks.add_task(_cleanup_file, tmp_pdf)
         raise HTTPException(status_code=500, detail="Report generation failed. See API logs.")
 
-
-# --- Pilot leads (optional) ---
+# -----------------------------
+# Pilot leads (optional)
+# -----------------------------
 class LeadIn(BaseModel):
-    email: EmailStr
+    email: str
     role: str | None = None
     use_case: str | None = None
     notes: str | None = None
-
 
 @app.post("/lead")
 async def lead(payload: LeadIn):
     try:
         line = {
-            "email": payload.email,
+            "email": (payload.email or "").strip().lower(),
             "role": payload.role,
             "use_case": payload.use_case,
             "notes": payload.notes,
