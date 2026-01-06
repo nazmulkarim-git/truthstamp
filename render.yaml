@@ -21,10 +21,8 @@ services:
         fromDatabase:
           name: truthstamp-db
           property: connectionString
-      # Admin key for approving users (set in Render dashboard after first deploy)
       - key: TRUTHSTAMP_ADMIN_API_KEY
         generateValue: true
-      # Email (optional): configure in Render dashboard to send temporary passwords
       - key: SMTP_HOST
         value: ""
       - key: SMTP_PORT
@@ -39,7 +37,6 @@ services:
   - type: web
     name: truthstamp-web
     env: node
-    nodeVersion: 20
     rootDir: web
     plan: free
     autoDeploy: true
