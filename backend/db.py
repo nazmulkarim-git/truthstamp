@@ -268,17 +268,17 @@ async def create_case(pool: asyncpg.Pool, user_id: str, title: str, description:
     return _row_to_case(row)
 
 
-async def list_cases(pool: asyncpg.Pool, user_id: str, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+async def list_cases(pool: asyncpg.Pool, user_id: str | None, limit: int = 50, offset: int = 0):
     async with pool.acquire() as con:
         rows = await con.fetch(
             """
             SELECT id, user_id, title, description, status, created_at
             FROM cases
-            WHERE user_id = $1
+            WHERE ($1::text IS NULL OR user_id = $1)
             ORDER BY created_at DESC
             LIMIT $2 OFFSET $3;
             """,
-            uuid.UUID(user_id),
+            (uuid.UUID(user_id) if user_id else None),
             limit,
             offset,
         )
@@ -293,8 +293,8 @@ async def get_case(pool: asyncpg.Pool, user_id: str, case_id: str) -> Optional[D
             FROM cases
             WHERE id = $1 AND user_id = $2;
             """,
-            uuid.UUID(case_id),
-            uuid.UUID(user_id),
+            (uuid.UUID(case_id) if case_id else None),
+            (uuid.UUID(user_id) if user_id else None),
         )
     return _row_to_case(row) if row else None
 
@@ -404,17 +404,17 @@ async def add_event(
     return _row_to_event(row)
 
 
-async def list_events(pool: asyncpg.Pool, case_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+async def list_events(pool: asyncpg.Pool, case_id: str | None, limit: int = 200) -> List[Dict[str, Any]]:
     async with pool.acquire() as con:
         rows = await con.fetch(
             """
             SELECT id, case_id, evidence_id, event_type, actor, ip, user_agent, details_json, created_at
             FROM events
-            WHERE case_id = $1
+            WHERE ($1::text IS NULL OR case_id = $1)
             ORDER BY created_at DESC
             LIMIT $2;
             """,
-            uuid.UUID(case_id),
+            (uuid.UUID(case_id) if case_id else None),
             limit,
         )
     return [_row_to_event(r) for r in rows]
@@ -491,4 +491,46 @@ def _row_to_event(row: asyncpg.Record) -> Dict[str, Any]:
         "user_agent": row.get("user_agent"),
         "details": details or {},
         "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+    }
+
+
+async def list_users(pool: asyncpg.Pool, status: str = "all", limit: int = 200) -> List[Dict[str, Any]]:
+    """status: all | pending | approved"""
+    where = ""
+    if status == "pending":
+        where = "WHERE is_approved = false"
+    elif status == "approved":
+        where = "WHERE is_approved = true"
+    q = f"""
+        SELECT id, name, email, phone, occupation, company, extras, is_active, is_approved, must_change_password, created_at
+        FROM users
+        {where}
+        ORDER BY created_at DESC
+        LIMIT $1
+    """
+    async with pool.acquire() as con:
+        rows = await con.fetch(q, limit)
+        return [dict(r) for r in rows]
+
+
+async def set_user_active(pool: asyncpg.Pool, user_id: str, is_active: bool) -> None:
+    async with pool.acquire() as con:
+        await con.execute("UPDATE users SET is_active=$2 WHERE id=$1", user_id, is_active)
+
+
+async def counts_overview(pool: asyncpg.Pool) -> Dict[str, int]:
+    async with pool.acquire() as con:
+        users_total = await con.fetchval("SELECT COUNT(*) FROM users")
+        users_pending = await con.fetchval("SELECT COUNT(*) FROM users WHERE is_approved=false")
+        users_approved = await con.fetchval("SELECT COUNT(*) FROM users WHERE is_approved=true")
+        cases_total = await con.fetchval("SELECT COUNT(*) FROM cases")
+        evidence_total = await con.fetchval("SELECT COUNT(*) FROM evidence")
+        events_total = await con.fetchval("SELECT COUNT(*) FROM events")
+    return {
+        "users_total": int(users_total or 0),
+        "users_pending": int(users_pending or 0),
+        "users_approved": int(users_approved or 0),
+        "cases_total": int(cases_total or 0),
+        "evidence_total": int(evidence_total or 0),
+        "events_total": int(events_total or 0),
     }

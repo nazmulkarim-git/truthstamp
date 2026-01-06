@@ -1,4 +1,52 @@
-import os
+i
+
+@app.get("/admin/overview")
+async def admin_overview(request: Request, pool: Pool = Depends(get_pool)):
+    require_admin(request)
+    counts = await db.counts_overview(pool)
+    recent_events = await db.list_events(pool, case_id=None, limit=50)  # type: ignore
+    # list_events currently expects case_id; we'll implement a fallback below if needed.
+    return {"counts": counts, "recent_events": recent_events}
+
+
+@app.get("/admin/users")
+async def admin_users(request: Request, status: str = "all", pool: Pool = Depends(get_pool)):
+    require_admin(request)
+    users = await db.list_users(pool, status=status, limit=500)
+    return {"users": users}
+
+
+@app.post("/admin/users/{user_id}/disable")
+async def admin_disable_user(user_id: str, request: Request, pool: Pool = Depends(get_pool)):
+    require_admin(request)
+    await db.set_user_active(pool, user_id, False)
+    return {"ok": True}
+
+
+@app.post("/admin/users/{user_id}/enable")
+async def admin_enable_user(user_id: str, request: Request, pool: Pool = Depends(get_pool)):
+    require_admin(request)
+    await db.set_user_active(pool, user_id, True)
+    return {"ok": True}
+
+
+@app.get("/admin/cases")
+async def admin_cases(request: Request, pool: Pool = Depends(get_pool)):
+    require_admin(request)
+    cases = await db.list_cases(pool, user_id=None, limit=500)  # type: ignore
+    return {"cases": cases}
+
+
+@app.get("/admin/cases/{case_id}")
+async def admin_case_detail(case_id: str, request: Request, pool: Pool = Depends(get_pool)):
+    require_admin(request)
+    c = await db.get_case(pool, case_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="Case not found")
+    ev = await db.list_evidence(pool, case_id)
+    events = await db.list_events(pool, case_id)
+    return {"case": c, "evidence": ev, "events": events}
+mport os
 import json
 import tempfile
 import traceback
