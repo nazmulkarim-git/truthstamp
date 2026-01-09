@@ -348,3 +348,76 @@ async def counts_overview(pool):
         "evidence_total": int(evidence_total or 0),
         "events_total": int(events_total or 0),
     }
+
+
+async def init_db(pool):
+    """
+    Ensures required tables exist.
+    Does NOT drop or modify existing data.
+    Safe to run on every startup.
+    """
+    async with pool.acquire() as con:
+        await con.execute("""
+        CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+        """)
+
+        # USERS
+        await con.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            name TEXT,
+            email TEXT PRIMARY KEY,
+            phone TEXT,
+            occupation TEXT,
+            company TEXT,
+            extras JSONB,
+            password_hash TEXT,
+            is_active BOOLEAN DEFAULT FALSE,
+            is_approved BOOLEAN DEFAULT FALSE,
+            must_change_password BOOLEAN DEFAULT TRUE,
+            requested_at TIMESTAMPTZ,
+            approved_at TIMESTAMPTZ
+        );
+        """)
+
+        # CASES
+        await con.execute("""
+        CREATE TABLE IF NOT EXISTS cases (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            user_id UUID,
+            title TEXT,
+            description TEXT,
+            status TEXT,
+            created_at TIMESTAMPTZ
+        );
+        """)
+
+        # EVIDENCE
+        await con.execute("""
+        CREATE TABLE IF NOT EXISTS evidence (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            case_id UUID,
+            filename TEXT,
+            sha256 TEXT,
+            media_type TEXT,
+            bytes BIGINT,
+            provenance_state TEXT,
+            summary TEXT,
+            analysis_json JSONB,
+            created_at TIMESTAMPTZ
+        );
+        """)
+
+        # EVENTS (CHAIN OF CUSTODY)
+        await con.execute("""
+        CREATE TABLE IF NOT EXISTS events (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            case_id UUID,
+            evidence_id UUID,
+            event_type TEXT,
+            actor TEXT,
+            ip TEXT,
+            user_agent TEXT,
+            details_json JSONB,
+            created_at TIMESTAMPTZ
+        );
+        """)
