@@ -1,448 +1,543 @@
+"""
+TruthStamp asyncpg data-access layer.
+
+Goals:
+- Work with Render Postgres (asyncpg) and a simple FastAPI backend.
+- Be resilient to UUID types returned by asyncpg (asyncpg.pgproto.UUID).
+- Keep schema aligned with what you see in pgAdmin:
+    users(id uuid, name, email, phone, occupation, company, extras jsonb,
+          password_hash, is_active, is_approved, must_change_password,
+          requested_at timestamptz, approved_at timestamptz)
+    cases(id uuid, user_id uuid, title, description, status, created_at timestamptz)
+    evidence(id uuid, case_id uuid, filename, sha256, media_type, bytes bigint,
+             provenance_state, summary, analysis_json jsonb, created_at timestamptz)
+    events(id uuid, case_id uuid, evidence_id uuid, event_type, actor, ip, user_agent,
+           details_json jsonb, created_at timestamptz)
+
+This file intentionally contains *no* FastAPI routes—only DB helpers.
+"""
 from __future__ import annotations
 
-import os
 import json
 import uuid
-import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import asyncpg
 
-
-# -----------------------------
-# Utils
-# -----------------------------
-
-def _utcnow() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
-
-def _uuid() -> uuid.UUID:
-    return uuid.uuid4()
-
-def dsn_from_env() -> str:
-    dsn = os.getenv("DATABASE_URL") or os.getenv("TRUTHSTAMP_DATABASE_URL")
-    if not dsn:
-        raise RuntimeError("DATABASE_URL is not set")
-    if dsn.startswith("postgres://"):
-        dsn = "postgresql://" + dsn[len("postgres://"):]
-    return dsn
+UUIDLike = Union[str, uuid.UUID, Any]  # tolerate asyncpg UUID wrapper
 
 
 # -----------------------------
-# Connection
+# Helpers
 # -----------------------------
+def _to_uuid(value: UUIDLike) -> uuid.UUID:
+    """Coerce asyncpg UUID / str / uuid.UUID into uuid.UUID."""
+    if isinstance(value, uuid.UUID):
+        return value
+    s = str(value).strip()
+    return uuid.UUID(s)
 
-async def create_pool() -> asyncpg.Pool:
-    pool = await asyncpg.create_pool(dsn_from_env(), min_size=1, max_size=5)
-    return pool
+
+def _is_email(value: Any) -> bool:
+    s = str(value).strip()
+    return "@" in s and "." in s.split("@")[-1]
+
+
+def _row_to_dict(row: asyncpg.Record) -> Dict[str, Any]:
+    d = dict(row)
+    # Make JSON-serializable (uuid.UUID + asyncpg UUID wrapper)
+    for k, v in list(d.items()):
+        if isinstance(v, uuid.UUID):
+            d[k] = str(v)
+        else:
+            if v is not None and v.__class__.__name__ == "UUID":
+                try:
+                    d[k] = str(v)
+                except Exception:
+                    pass
+    return d
+
+
+async def _has_column(con: asyncpg.Connection, table: str, column: str) -> bool:
+    q = """
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = $1 AND column_name = $2
+    LIMIT 1
+    """
+    return await con.fetchval(q, table, column) is not None
 
 
 # -----------------------------
-# USERS
+# Schema init / migrations
 # -----------------------------
+async def init_db(pool: asyncpg.Pool) -> None:
+    """
+    Create tables if missing and apply lightweight, safe migrations.
+    This is designed to be idempotent.
+    """
+    async with pool.acquire() as con:
+        await con.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
 
-async def create_access_request(
+        # USERS
+        await con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+              id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+              name text,
+              email text UNIQUE NOT NULL,
+              phone text,
+              occupation text,
+              company text,
+              extras jsonb DEFAULT '{}'::jsonb,
+              password_hash text NOT NULL,
+              is_active boolean NOT NULL DEFAULT false,
+              is_approved boolean NOT NULL DEFAULT false,
+              must_change_password boolean NOT NULL DEFAULT true,
+              requested_at timestamptz NOT NULL DEFAULT now(),
+              approved_at timestamptz
+            );
+            """
+        )
+
+        # If an older schema exists without id, add it.
+        if not await _has_column(con, "users", "id"):
+            await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS id uuid;")
+            await con.execute("UPDATE users SET id = gen_random_uuid() WHERE id IS NULL;")
+            try:
+                await con.execute("ALTER TABLE users ADD PRIMARY KEY (id);")
+            except Exception:
+                pass
+
+        try:
+            await con.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_email_uq ON users(email);")
+        except Exception:
+            pass
+
+        # CASES
+        await con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cases (
+              id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+              user_id uuid NOT NULL,
+              title text NOT NULL,
+              description text DEFAULT '',
+              status text NOT NULL DEFAULT 'open',
+              created_at timestamptz NOT NULL DEFAULT now()
+            );
+            """
+        )
+        try:
+            await con.execute("CREATE INDEX IF NOT EXISTS cases_user_id_idx ON cases(user_id);")
+        except Exception:
+            pass
+
+        # EVIDENCE
+        await con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS evidence (
+              id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+              case_id uuid NOT NULL,
+              filename text NOT NULL,
+              sha256 text NOT NULL,
+              media_type text NOT NULL,
+              bytes bigint NOT NULL DEFAULT 0,
+              provenance_state text NOT NULL DEFAULT 'unknown',
+              summary text DEFAULT '',
+              analysis_json jsonb DEFAULT '{}'::jsonb,
+              created_at timestamptz NOT NULL DEFAULT now()
+            );
+            """
+        )
+        try:
+            await con.execute("CREATE INDEX IF NOT EXISTS evidence_case_id_idx ON evidence(case_id);")
+        except Exception:
+            pass
+
+        # EVENTS
+        await con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS events (
+              id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+              case_id uuid NOT NULL,
+              evidence_id uuid,
+              event_type text NOT NULL,
+              actor text DEFAULT '',
+              ip text DEFAULT '',
+              user_agent text DEFAULT '',
+              details_json jsonb DEFAULT '{}'::jsonb,
+              created_at timestamptz NOT NULL DEFAULT now()
+            );
+            """
+        )
+        try:
+            await con.execute("CREATE INDEX IF NOT EXISTS events_case_id_idx ON events(case_id);")
+        except Exception:
+            pass
+
+
+# -----------------------------
+# Users
+# -----------------------------
+async def get_user_by_email(pool: asyncpg.Pool, email: str) -> Optional[Dict[str, Any]]:
+    async with pool.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM users WHERE email = $1", email.lower().strip())
+        return _row_to_dict(row) if row else None
+
+
+async def get_user_by_id(pool: asyncpg.Pool, user_id: UUIDLike) -> Optional[Dict[str, Any]]:
+    uid = _to_uuid(user_id)
+    async with pool.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM users WHERE id = $1", uid)
+        return _row_to_dict(row) if row else None
+
+
+async def list_users(pool: asyncpg.Pool, status: str = "all", limit: int = 200) -> List[Dict[str, Any]]:
+    """
+    status:
+      - all
+      - pending  (not approved)
+      - approved
+      - active
+      - disabled
+    """
+    status = (status or "all").lower()
+    where = "TRUE"
+    if status == "pending":
+        where = "is_approved = FALSE"
+    elif status == "approved":
+        where = "is_approved = TRUE"
+    elif status == "active":
+        where = "is_active = TRUE"
+    elif status == "disabled":
+        where = "is_active = FALSE"
+
+    q = f"""
+    SELECT *
+    FROM users
+    WHERE {where}
+    ORDER BY requested_at DESC
+    LIMIT $1
+    """
+    async with pool.acquire() as con:
+        rows = await con.fetch(q, limit)
+        return [_row_to_dict(r) for r in rows]
+
+
+async def create_user_request(
     pool: asyncpg.Pool,
     *,
     name: str,
     email: str,
-    phone: Optional[str],
-    occupation: Optional[str],
-    company: Optional[str],
+    phone: str = "",
+    occupation: str = "",
+    company: str = "",
     extras: Optional[Dict[str, Any]] = None,
-):
+    password_hash: str,
+) -> Dict[str, Any]:
+    email_n = email.lower().strip()
+    extras = extras or {}
     async with pool.acquire() as con:
         row = await con.fetchrow(
             """
-            INSERT INTO users
-              (name, email, phone, occupation, company, extras, requested_at)
-            VALUES
-              ($1,$2,$3,$4,$5,$6,$7)
+            INSERT INTO users (name, email, phone, occupation, company, extras, password_hash,
+                               is_active, is_approved, must_change_password)
+            VALUES ($1,$2,$3,$4,$5,$6,$7, FALSE, FALSE, TRUE)
+            ON CONFLICT (email) DO UPDATE SET
+              name = EXCLUDED.name,
+              phone = EXCLUDED.phone,
+              occupation = EXCLUDED.occupation,
+              company = EXCLUDED.company,
+              extras = EXCLUDED.extras
             RETURNING *;
             """,
-            name.strip(),
-            email.strip().lower(),
+            name,
+            email_n,
             phone,
             occupation,
             company,
-            json.dumps(extras or {}),
-            _utcnow(),
+            json.dumps(extras),
+            password_hash,
         )
-    return dict(row)
+        return _row_to_dict(row)
 
 
-async def list_users(pool, status: Optional[str] = None, limit: int = 500):
+async def set_user_active(pool: Pool, user_id_or_email: Any, active: bool) -> None:
+    """
+    Set a user's active flag.
+
+    Accepts either:
+      - user UUID (uuid.UUID / asyncpg UUID / uuid string)
+      - email string
+    """
     async with pool.acquire() as con:
-        if status == "pending":
-            q = """
-            SELECT * FROM users
-            WHERE is_approved = FALSE
-            ORDER BY requested_at DESC
-            LIMIT $1
-            """
-            rows = await con.fetch(q, limit)
+        if user_id_or_email is None:
+            raise ValueError("user_id_or_email is required")
 
-        elif status == "approved":
-            q = """
-            SELECT * FROM users
-            WHERE is_approved = TRUE
-            ORDER BY approved_at DESC NULLS LAST
-            LIMIT $1
-            """
-            rows = await con.fetch(q, limit)
+        # Email path
+        if isinstance(user_id_or_email, str) and "@" in user_id_or_email:
+            await con.execute(
+                "UPDATE users SET is_active = $2 WHERE lower(email) = lower($1)",
+                user_id_or_email,
+                active,
+            )
+            return
 
+        # UUID path
+        if isinstance(user_id_or_email, uuid.UUID):
+            user_uuid = user_id_or_email
         else:
-            q = """
-            SELECT * FROM users
-            ORDER BY requested_at DESC
-            LIMIT $1
-            """
-            rows = await con.fetch(q, limit)
+            user_uuid = uuid.UUID(str(user_id_or_email))
 
-    return [dict(r) for r in rows]
-
-
-async def get_user_by_email(pool, email: str):
-    async with pool.acquire() as con:
-        row = await con.fetchrow(
-            "SELECT * FROM users WHERE email=$1",
-            email.lower(),
+        await con.execute(
+            "UPDATE users SET is_active = $2 WHERE id = $1",
+            user_uuid,
+            active,
         )
-    return dict(row) if row else None
 
 
-async def set_user_active(pool, user_identifier, active: bool):
+async def set_user_approved(pool: Pool, user_id_or_email: Any, approved: bool) -> None:
+    """
+    Set a user's approved flag.
+
+    Accepts either:
+      - user UUID (uuid.UUID / asyncpg UUID / uuid string)
+      - email string
+    """
     async with pool.acquire() as con:
-        # If UUID is passed, match by id
-        if isinstance(user_identifier, (str,)) and "@" in user_identifier:
-            # Email path
+        if user_id_or_email is None:
+            raise ValueError("user_id_or_email is required")
+
+        # Email path
+        if isinstance(user_id_or_email, str) and "@" in user_id_or_email:
             await con.execute(
-                """
-                UPDATE users
-                SET is_active = $2
-                WHERE email = $1
-                """,
-                user_identifier.lower(), active
+                "UPDATE users SET is_approved = $2, approved_at = CASE WHEN $2 THEN now() ELSE NULL END WHERE lower(email) = lower($1)",
+                user_id_or_email,
+                approved,
             )
+            return
+
+        # UUID path
+        if isinstance(user_id_or_email, uuid.UUID):
+            user_uuid = user_id_or_email
         else:
-            # UUID path
-            await con.execute(
-                """
-                UPDATE users
-                SET is_active = $2
-                WHERE id = $1
-                """,
-                user_identifier, active
-            )
+            user_uuid = uuid.UUID(str(user_id_or_email))
 
-
-async def set_user_approved(pool, user_identifier, approved: bool):
-    async with pool.acquire() as con:
-        # If identifier is email
-        if isinstance(user_identifier, str) and "@" in user_identifier:
-            await con.execute(
-                """
-                UPDATE users
-                SET is_approved = $2,
-                    approved_at = NOW()
-                WHERE email = $1
-                """,
-                user_identifier.lower(), approved
-            )
-        else:
-            # Assume UUID
-            await con.execute(
-                """
-                UPDATE users
-                SET is_approved = $2,
-                    approved_at = NOW()
-                WHERE id = $1
-                """,
-                user_identifier, approved
-            )
-
-
-async def set_user_password(pool, email: str, password_hash: str, must_change_password: bool):
-    async with pool.acquire() as con:
-        row = await con.fetchrow(
-            """
-            UPDATE users
-            SET password_hash=$2,
-                must_change_password=$3
-            WHERE email=$1
-            RETURNING email
-            """,
-            email.lower(), password_hash, must_change_password
+        await con.execute(
+            "UPDATE users SET is_approved = $2, approved_at = CASE WHEN $2 THEN now() ELSE NULL END WHERE id = $1",
+            user_uuid,
+            approved,
         )
-        if not row:
-            raise ValueError("User not found")
+
+
+async def set_user_password_hash(pool: asyncpg.Pool, user_identifier: Any, password_hash: str, must_change: bool) -> None:
+    async with pool.acquire() as con:
+        if _is_email(user_identifier):
+            email = str(user_identifier).lower().strip()
+            await con.execute(
+                "UPDATE users SET password_hash=$2, must_change_password=$3 WHERE email=$1",
+                email,
+                password_hash,
+                must_change,
+            )
+        else:
+            uid = _to_uuid(user_identifier)
+            await con.execute(
+                "UPDATE users SET password_hash=$2, must_change_password=$3 WHERE id=$1",
+                uid,
+                password_hash,
+                must_change,
+            )
 
 
 # -----------------------------
-# CASES
+# Cases
 # -----------------------------
-
-async def create_case(pool, user_id: str, title: str, description: Optional[str]):
+async def create_case(
+    pool: asyncpg.Pool,
+    *,
+    user_id: Any,
+    title: str,
+    description: str = "",
+    status: str = "open",
+) -> Dict[str, Any]:
+    uid = _to_uuid(user_id)
     async with pool.acquire() as con:
         row = await con.fetchrow(
             """
-            INSERT INTO cases (user_id, title, description, created_at)
+            INSERT INTO cases (user_id, title, description, status)
             VALUES ($1,$2,$3,$4)
             RETURNING *;
             """,
-            uuid.UUID(user_id),
+            uid,
             title,
             description,
-            _utcnow(),
+            status,
         )
-    return dict(row)
+        return _row_to_dict(row)
 
 
-async def list_cases(pool, user_id: Optional[str] = None, limit: int = 500):
+async def list_cases(pool: asyncpg.Pool, user_id: Optional[Any] = None, limit: int = 200) -> List[Dict[str, Any]]:
     async with pool.acquire() as con:
-        if not user_id:
+        if user_id is None:
             rows = await con.fetch(
-                """
-                SELECT * FROM cases
-                ORDER BY created_at DESC
-                LIMIT $1
-                """,
+                "SELECT * FROM cases ORDER BY created_at DESC LIMIT $1",
                 limit,
             )
         else:
+            uid = _to_uuid(user_id)
             rows = await con.fetch(
-                """
-                SELECT * FROM cases
-                WHERE user_id = $1
-                ORDER BY created_at DESC
-                LIMIT $2
-                """,
-                uuid.UUID(user_id), limit,
+                "SELECT * FROM cases WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2",
+                uid,
+                limit,
             )
+        return [_row_to_dict(r) for r in rows]
 
-    return [dict(r) for r in rows]
+
+async def get_case(pool: asyncpg.Pool, case_id: Any) -> Optional[Dict[str, Any]]:
+    cid = _to_uuid(case_id)
+    async with pool.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM cases WHERE id = $1", cid)
+        return _row_to_dict(row) if row else None
 
 
 # -----------------------------
-# EVIDENCE
+# Evidence
 # -----------------------------
-
-async def add_evidence(
-    pool,
+async def create_evidence(
+    pool: asyncpg.Pool,
     *,
-    case_id: str,
+    case_id: Any,
     filename: str,
     sha256: str,
-    media_type: Optional[str],
-    nbytes: int,
-    provenance_state: Optional[str],
-    summary: Optional[str],
-    analysis: Dict[str, Any],
-):
+    media_type: str,
+    bytes_size: int,
+    provenance_state: str,
+    summary: str,
+    analysis_json: Dict[str, Any],
+) -> Dict[str, Any]:
+    cid = _to_uuid(case_id)
     async with pool.acquire() as con:
         row = await con.fetchrow(
             """
-            INSERT INTO evidence
-              (case_id, filename, sha256, media_type, bytes, provenance_state,
-               summary, analysis_json, created_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-            RETURNING *;
-            """,
-            uuid.UUID(case_id),
-            filename,
-            sha256,
-            media_type,
-            int(nbytes),
-            provenance_state,
-            summary,
-            json.dumps(analysis),
-            _utcnow(),
-        )
-    return dict(row)
-
-
-async def list_evidence(pool, case_id: Optional[str] = None, limit: int = 500):
-    async with pool.acquire() as con:
-        if not case_id:
-            rows = await con.fetch(
-                """
-                SELECT * FROM evidence
-                ORDER BY created_at DESC
-                LIMIT $1
-                """,
-                limit,
-            )
-        else:
-            rows = await con.fetch(
-                """
-                SELECT * FROM evidence
-                WHERE case_id = $1
-                ORDER BY created_at DESC
-                LIMIT $2
-                """,
-                uuid.UUID(case_id), limit,
-            )
-
-    return [dict(r) for r in rows]
-
-
-# -----------------------------
-# EVENTS (AUDIT LOG)
-# -----------------------------
-
-async def add_event(
-    pool,
-    *,
-    case_id: str,
-    event_type: str,
-    evidence_id: Optional[str] = None,
-    actor: Optional[str] = None,
-    ip: Optional[str] = None,
-    user_agent: Optional[str] = None,
-    details: Optional[Dict[str, Any]] = None,
-):
-    async with pool.acquire() as con:
-        row = await con.fetchrow(
-            """
-            INSERT INTO events
-              (case_id, evidence_id, event_type, actor, ip, user_agent, details_json, created_at)
+            INSERT INTO evidence (case_id, filename, sha256, media_type, bytes,
+                                 provenance_state, summary, analysis_json)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
             RETURNING *;
             """,
-            uuid.UUID(case_id),
-            uuid.UUID(evidence_id) if evidence_id else None,
+            cid,
+            filename,
+            sha256,
+            media_type,
+            int(bytes_size or 0),
+            provenance_state,
+            summary,
+            json.dumps(analysis_json or {}),
+        )
+        return _row_to_dict(row)
+
+
+async def list_evidence(pool: asyncpg.Pool, case_id: Any, limit: int = 200) -> List[Dict[str, Any]]:
+    cid = _to_uuid(case_id)
+    async with pool.acquire() as con:
+        rows = await con.fetch(
+            "SELECT * FROM evidence WHERE case_id = $1 ORDER BY created_at DESC LIMIT $2",
+            cid,
+            limit,
+        )
+        return [_row_to_dict(r) for r in rows]
+
+
+async def get_evidence(pool: asyncpg.Pool, evidence_id: Any) -> Optional[Dict[str, Any]]:
+    eid = _to_uuid(evidence_id)
+    async with pool.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM evidence WHERE id = $1", eid)
+        return _row_to_dict(row) if row else None
+
+
+# -----------------------------
+# Events (chain of custody)
+# -----------------------------
+async def create_event(
+    pool: asyncpg.Pool,
+    *,
+    case_id: Any,
+    evidence_id: Optional[Any],
+    event_type: str,
+    actor: str,
+    ip: str = "",
+    user_agent: str = "",
+    details: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    cid = _to_uuid(case_id)
+    eid = _to_uuid(evidence_id) if evidence_id else None
+    details = details or {}
+    async with pool.acquire() as con:
+        row = await con.fetchrow(
+            """
+            INSERT INTO events (case_id, evidence_id, event_type, actor, ip, user_agent, details_json)
+            VALUES ($1,$2,$3,$4,$5,$6,$7)
+            RETURNING *;
+            """,
+            cid,
+            eid,
             event_type,
             actor,
             ip,
             user_agent,
-            json.dumps(details or {}),
-            _utcnow(),
+            json.dumps(details),
         )
-    return dict(row)
+        return _row_to_dict(row)
 
 
-async def list_events(pool, case_id: Optional[str] = None, limit: int = 50):
+async def list_events(
+    pool: asyncpg.Pool,
+    case_id: Optional[Any] = None,
+    limit: int = 200,
+) -> List[Dict[str, Any]]:
     async with pool.acquire() as con:
-        if not case_id:
+        if case_id is None:
             rows = await con.fetch(
                 """
-                SELECT *, details_json AS details FROM events
+                SELECT * FROM events
                 ORDER BY created_at DESC
                 LIMIT $1
                 """,
                 limit,
             )
         else:
+            cid = _to_uuid(case_id)
             rows = await con.fetch(
                 """
-                SELECT *, details_json AS details FROM events
+                SELECT * FROM events
                 WHERE case_id = $1
                 ORDER BY created_at DESC
                 LIMIT $2
                 """,
-                uuid.UUID(case_id), limit,
+                cid,
+                limit,
             )
-
-    out = []
-    for r in rows:
-        d = dict(r)
-        d["details"] = d.get("details_json") or {}
-        out.append(d)
-
-    return out
+        return [_row_to_dict(r) for r in rows]
 
 
 # -----------------------------
-# ADMIN DASHBOARD COUNTS
+# Simple counts for admin dashboard
 # -----------------------------
-
-async def counts_overview(pool):
+async def count_users(pool: asyncpg.Pool) -> int:
     async with pool.acquire() as con:
-        users_total = await con.fetchval("SELECT COUNT(*) FROM users")
-        users_pending = await con.fetchval("SELECT COUNT(*) FROM users WHERE is_approved=false")
-        users_approved = await con.fetchval("SELECT COUNT(*) FROM users WHERE is_approved=true")
-        cases_total = await con.fetchval("SELECT COUNT(*) FROM cases")
-        evidence_total = await con.fetchval("SELECT COUNT(*) FROM evidence")
-        events_total = await con.fetchval("SELECT COUNT(*) FROM events")
-
-    return {
-        "users_total": int(users_total or 0),
-        "users_pending": int(users_pending or 0),
-        "users_approved": int(users_approved or 0),
-        "cases_total": int(cases_total or 0),
-        "evidence_total": int(evidence_total or 0),
-        "events_total": int(events_total or 0),
-    }
+        return int(await con.fetchval("SELECT COUNT(*) FROM users"))
 
 
-async def init_db(pool):
-    """
-    Ensures required tables exist.
-    Does NOT drop or modify existing data.
-    Safe to run on every startup.
-    """
+async def count_cases(pool: asyncpg.Pool) -> int:
     async with pool.acquire() as con:
-        await con.execute("""
-        CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-        """)
+        return int(await con.fetchval("SELECT COUNT(*) FROM cases"))
 
-        # USERS
-        await con.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            name TEXT,
-            email TEXT PRIMARY KEY,
-            phone TEXT,
-            occupation TEXT,
-            company TEXT,
-            extras JSONB,
-            password_hash TEXT,
-            is_active BOOLEAN DEFAULT FALSE,
-            is_approved BOOLEAN DEFAULT FALSE,
-            must_change_password BOOLEAN DEFAULT TRUE,
-            requested_at TIMESTAMPTZ,
-            approved_at TIMESTAMPTZ
-        );
-        """)
 
-        # CASES
-        await con.execute("""
-        CREATE TABLE IF NOT EXISTS cases (
-            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-            user_id UUID,
-            title TEXT,
-            description TEXT,
-            status TEXT,
-            created_at TIMESTAMPTZ
-        );
-        """)
+async def count_evidence(pool: asyncpg.Pool) -> int:
+    async with pool.acquire() as con:
+        return int(await con.fetchval("SELECT COUNT(*) FROM evidence"))
 
-        # EVIDENCE
-        await con.execute("""
-        CREATE TABLE IF NOT EXISTS evidence (
-            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-            case_id UUID,
-            filename TEXT,
-            sha256 TEXT,
-            media_type TEXT,
-            bytes BIGINT,
-            provenance_state TEXT,
-            summary TEXT,
-            analysis_json JSONB,
-            created_at TIMESTAMPTZ
-        );
-        """)
 
-        # EVENTS (CHAIN OF CUSTODY)
-        await con.execute("""
-        CREATE TABLE IF NOT EXISTS events (
-            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-            case_id UUID,
-            evidence_id UUID,
-            event_type TEXT,
-            actor TEXT,
-            ip TEXT,
-            user_agent TEXT,
-            details_json JSONB,
-            created_at TIMESTAMPTZ
-        );
-        """)
+async def count_pending_users(pool: asyncpg.Pool) -> int:
+    async with pool.acquire() as con:
+        return int(await con.fetchval("SELECT COUNT(*) FROM users WHERE is_approved = FALSE"))
