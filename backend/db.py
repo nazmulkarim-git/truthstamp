@@ -111,14 +111,29 @@ async def get_user_by_email(pool, email: str):
     return dict(row) if row else None
 
 
-async def set_user_active(pool, email: str, active: bool):
+async def set_user_active(pool, user_identifier, active: bool):
     async with pool.acquire() as con:
-        row = await con.fetchrow(
-            "UPDATE users SET is_active=$2 WHERE email=$1 RETURNING email",
-            email.lower(), active
-        )
-        if not row:
-            raise ValueError("User not found")
+        # If UUID is passed, match by id
+        if isinstance(user_identifier, (str,)) and "@" in user_identifier:
+            # Email path
+            await con.execute(
+                """
+                UPDATE users
+                SET is_active = $2
+                WHERE email = $1
+                """,
+                user_identifier.lower(), active
+            )
+        else:
+            # UUID path
+            await con.execute(
+                """
+                UPDATE users
+                SET is_active = $2
+                WHERE id = $1
+                """,
+                user_identifier, active
+            )
 
 
 async def set_user_approved(pool, email: str, approved: bool):
