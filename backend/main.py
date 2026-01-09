@@ -213,6 +213,10 @@ class ChangePasswordIn(BaseModel):
     old_password: str | None = None
     new_password: str = Field(min_length=8, max_length=200)
 
+class AdminEnableUserRequest(BaseModel):
+    email: str
+    is_active: bool = True
+
 def _create_token(user_id: str, email: str) -> str:
     now = datetime.datetime.utcnow()
     exp = now + datetime.timedelta(hours=JWT_TTL_HOURS)
@@ -269,7 +273,11 @@ async def get_optional_user_async(request: Request, pool: Pool = Depends(get_poo
     except Exception:
         return None
 
-@app.post("/auth/register")
+@app.post("/admin/users/enable")
+async def admin_enable_user_by_email(req: AdminEnableUserRequest, pool=Depends(get_pool), ok=Depends(require_admin)):
+    await db.set_user_active(pool, req.email, req.is_active)
+    return {"ok": True}
+
 async def register(payload: AccessRequestIn, pool: Pool = Depends(get_pool)):
     """Invite-only registration.
 
