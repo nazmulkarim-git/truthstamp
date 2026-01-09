@@ -8,6 +8,8 @@ import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:10000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://truthstamp-api.onrender.com";
+
 
 type PendingUser = {
   id: string;
@@ -124,11 +126,11 @@ export default function AdminClient() {
   async function enableUser(email: string) {
   const adminKey = localStorage.getItem("truthstamp_admin_key") || "";
   const res = await fetch(`${API_URL}/admin/users/enable-by-email`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Admin-Key": adminKey,
-    },
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-Admin-Key": adminKey,
+  },
     body: JSON.stringify({ email, is_active: true, is_approved: true }),
   });
 

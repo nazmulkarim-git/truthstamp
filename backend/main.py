@@ -95,6 +95,7 @@ def require_admin(x_admin_key: str = Header(default="")):
         raise HTTPException(status_code=401, detail="Unauthorized")
     return True
 
+
 async def _get_case_admin(pool: Pool, case_id: str) -> Optional[Dict[str, Any]]:
     # Admin needs to fetch any case without user_id filter.
     import uuid
@@ -169,10 +170,10 @@ async def admin_enable_user_by_email(
     ok: bool = Depends(require_admin),
     pool=Depends(get_pool),
 ):
-    # Approve + enable in one action
     await db.set_user_approved(pool, req.email, req.is_approved)
     await db.set_user_active(pool, req.email, req.is_active)
     return {"ok": True, "email": req.email}
+
 
 # -----------------------------
 # Auth (PBKDF2-HMAC-SHA256 + JWT)
@@ -214,6 +215,7 @@ class EnableByEmail(BaseModel):
     email: str
     is_active: bool = True
     is_approved: bool = True
+
 
 class AccessRequestIn(BaseModel):
     name: str = Field(min_length=2, max_length=120)
