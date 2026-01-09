@@ -65,6 +65,7 @@ async def init_db(pool: asyncpg.Pool) -> None:
       - events(details_json, created_at)
     """
     async with pool.acquire() as con:
+        await con.execute('CREATE EXTENSION IF NOT EXISTS pgcrypto;')
         await con.execute(
             """
             CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -142,7 +143,41 @@ async def init_db(pool: asyncpg.Pool) -> None:
 # Users
 # -----------------------------------------------------------------------------
 
+<<<<<<< HEAD
 async def create_user_request(
+=======
+        # ---- Migrations for older schemas (safe no-ops if columns already exist)
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS id UUID;")
+        await con.execute("UPDATE users SET id = gen_random_uuid() WHERE id IS NULL;")
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS requested_at TIMESTAMPTZ DEFAULT NOW();")
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;")
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;")
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_approved BOOLEAN DEFAULT FALSE;")
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT FALSE;")
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS extras JSONB DEFAULT '{}'::jsonb;")
+
+        # Add primary key on users(id) if missing
+        await con.execute(
+            """DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'users'::regclass AND contype = 'p'
+                ) THEN
+                    ALTER TABLE users ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+                END IF;
+            EXCEPTION WHEN others THEN
+                -- ignore (e.g., lacks privileges or already has PK)
+            END $$;"""
+        )
+
+        await con.execute("ALTER TABLE events ADD COLUMN IF NOT EXISTS details_json JSONB DEFAULT '{}'::jsonb;")
+        await con.execute("ALTER TABLE events ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();")
+        await con.execute("ALTER TABLE cases ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();")
+        await con.execute("ALTER TABLE evidence ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();")
+
+
+async def create_access_request(
+>>>>>>> 30d16ff (Temp pass)
     pool: asyncpg.Pool,
     *,
     name: str,

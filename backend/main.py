@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import tempfile
@@ -57,6 +58,41 @@ from .engine import (
 # -----------------------------
 # App / CORS
 # -----------------------------
+
+import smtplib
+from email.message import EmailMessage
+
+def _smtp_configured() -> bool:
+    return bool(os.getenv("SMTP_HOST") and os.getenv("SMTP_USER") and os.getenv("SMTP_PASS"))
+
+def _generate_temp_password(length: int = 12) -> str:
+    # URL-safe, includes letters+numbers; trim to length
+    return secrets.token_urlsafe(max(8, length))[:length]
+
+async def _send_email(to_email: str, subject: str, body: str) -> None:
+    host = os.getenv("SMTP_HOST", "")
+    port = int(os.getenv("SMTP_PORT", "587"))
+    user = os.getenv("SMTP_USER", "")
+    password = os.getenv("SMTP_PASS", "")
+    from_addr = os.getenv("SMTP_FROM", "TruthStamp <no-reply@truthstamp.local>")
+
+    if not host or not user or not password:
+        return
+
+    msg = EmailMessage()
+    msg["From"] = from_addr
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.set_content(body)
+
+    def _send():
+        with smtplib.SMTP(host, port, timeout=20) as s:
+            s.starttls()
+            s.login(user, password)
+            s.send_message(msg)
+
+    await asyncio.to_thread(_send)
+
 app = FastAPI()
 
 _origins_raw = os.getenv(
@@ -231,6 +267,7 @@ async def get_optional_user_async(request: Request, pool: Pool = Depends(get_poo
 @app.get("/health")
 def health():
     return {"ok": True, "service": "truthstamp-api"}
+<<<<<<< HEAD
 
 def _too_big(nbytes: int) -> bool:
     return nbytes > MAX_MB * 1024 * 1024
@@ -427,6 +464,245 @@ async def admin_pending_users(
     users = await _admin_list_users(pool, status="pending", limit=200)
     return users
 
+=======
+
+def _too_big(nbytes: int) -> bool:
+    return nbytes > MAX_MB * 1024 * 1024
+
+def _cleanup_file(path: Optional[str]) -> None:
+    if not path:
+        return
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+# -----------------------------
+# ADMIN: use direct SQL matching your schemas
+#   events.details_json (jsonb)
+#   users.requested_at / approved_at
+# -----------------------------
+async def _admin_counts(pool: Pool) -> dict:
+    async with pool.acquire() as con:
+        users_total = await con.fetchval("SELECT COUNT(*) FROM users")
+        users_pending = await con.fetchval("SELECT COUNT(*) FROM users WHERE is_approved = FALSE")
+        cases_total = await con.fetchval("SELECT COUNT(*) FROM cases")
+        evidence_total = await con.fetchval("SELECT COUNT(*) FROM evidence")
+        events_total = await con.fetchval("SELECT COUNT(*) FROM events")
+    return {
+        "users_total": int(users_total or 0),
+        "users_pending": int(users_pending or 0),
+        "cases_total": int(cases_total or 0),
+        "evidence_total": int(evidence_total or 0),
+        "events_total": int(events_total or 0),
+    }
+
+async def _admin_recent_events(pool: Pool, limit: int = 50) -> list[dict]:
+    async with pool.acquire() as con:
+        rows = await con.fetch(
+            """
+            SELECT id, case_id, evidence_id, event_type, actor, ip, user_agent, details_json, created_at
+            FROM events
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    out = []
+    for r in rows:
+        out.append(
+            {
+                "id": str(r["id"]),
+                "case_id": str(r["case_id"]) if r["case_id"] else None,
+                "evidence_id": str(r["evidence_id"]) if r["evidence_id"] else None,
+                "event_type": r["event_type"],
+                "actor": r["actor"],
+                "ip": r["ip"],
+                "user_agent": r["user_agent"],
+                "details": r["details_json"] or {},
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+        )
+    return out
+
+async def _admin_list_users(pool: Pool, status: str = "all", limit: int = 500) -> list[dict]:
+    where = ""
+    params: list[Any] = [limit]
+    if status == "pending":
+        where = "WHERE is_approved = FALSE"
+    elif status == "approved":
+        where = "WHERE is_approved = TRUE"
+    elif status == "disabled":
+        where = "WHERE is_active = FALSE"
+
+    q = f"""
+        SELECT name, email, phone, occupation, company, extras,
+               is_active, is_approved, must_change_password,
+               requested_at, approved_at
+        FROM users
+        {where}
+        ORDER BY requested_at DESC NULLS LAST
+        LIMIT $1
+    """
+    async with pool.acquire() as con:
+        rows = await con.fetch(q, *params)
+
+    out = []
+    for r in rows:
+        out.append(
+            {
+                "name": r["name"],
+                "email": r["email"],
+                "phone": r["phone"],
+                "occupation": r["occupation"],
+                "company": r["company"],
+                "extras": r["extras"] or {},
+                "is_active": bool(r["is_active"]),
+                "is_approved": bool(r["is_approved"]),
+                "must_change_password": bool(r["must_change_password"]),
+                "requested_at": r["requested_at"].isoformat() if r["requested_at"] else None,
+                "approved_at": r["approved_at"].isoformat() if r["approved_at"] else None,
+            }
+        )
+    return out
+
+async def _admin_list_cases(pool: Pool, limit: int = 500) -> list[dict]:
+    async with pool.acquire() as con:
+        rows = await con.fetch(
+            """
+            SELECT id, user_id, title, description, status, created_at
+            FROM cases
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    out = []
+    for r in rows:
+        out.append(
+            {
+                "id": str(r["id"]),
+                "user_id": str(r["user_id"]) if r["user_id"] else None,
+                "title": r["title"],
+                "description": r["description"],
+                "status": r["status"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+        )
+    return out
+
+
+async def _admin_set_user_flags_by_email(pool, email: str, is_active: bool | None, is_approved: bool | None, *, issue_temp_password: bool = False):
+    # Normalize
+    email_norm = (email or "").strip().lower()
+    if not email_norm:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    # Update flags
+    sets = []
+    args = [email_norm]
+    if is_active is not None:
+        sets.append(f"is_active=${len(args)+1}")
+        args.append(bool(is_active))
+    if is_approved is not None:
+        sets.append(f"is_approved=${len(args)+1}")
+        args.append(bool(is_approved))
+        # stamp approved_at if approving
+        if bool(is_approved):
+            sets.append("approved_at=NOW()")
+    if not sets:
+        # nothing to update, but still allow issuing temp password
+        pass
+    else:
+        q = "UPDATE users SET " + ", ".join(sets) + " WHERE email=$1 RETURNING email"
+        async with pool.acquire() as con:
+            row = await con.fetchrow(q, *args)
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+
+    user = await db.get_user_by_email(pool, email_norm)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    temp_password: str | None = None
+
+    # Issue temp password when approving (or when explicitly asked)
+    if issue_temp_password and (is_approved is None or bool(is_approved)):
+        temp_password = _generate_temp_password()
+        password_hash = _hash_password(temp_password)
+        # Ensure user has id; if missing, init_db migration should have created it
+        await db.set_user_password(pool, str(user["id"]), password_hash, must_change_password=True)
+
+        # Email it if SMTP is configured; otherwise return in response so admin can copy-paste
+        subject = "Your TruthStamp temporary password"
+        body = (
+            "Your account has been approved.
+
+"
+            f"Login email: {email_norm}
+"
+            f"Temporary password: {temp_password}
+
+"
+            "After logging in, you will be prompted to change your password immediately.
+
+"
+            "— TruthStamp"
+        )
+        await _send_email(email_norm, subject, body)
+
+    # Return the updated user (sanitized) and temp password (if generated and SMTP not configured)
+    sanitized = _sanitize_user(user)
+    return {"user": sanitized, "temp_password": (temp_password if not _smtp_configured() else None)}
+
+
+@app.get("/admin/overview")
+async def admin_overview(
+    ok: bool = Depends(require_admin),
+    pool: Pool = Depends(get_pool),
+):
+    counts = await _admin_counts(pool)
+    recent_events = await _admin_recent_events(pool, limit=50)
+    return {"counts": counts, "recent_events": recent_events}
+
+@app.get("/admin/users")
+async def admin_users(
+    status: str = "all",
+    ok: bool = Depends(require_admin),
+    pool: Pool = Depends(get_pool),
+):
+    users = await _admin_list_users(pool, status=status, limit=500)
+    return {"users": users}
+
+@app.get("/admin/cases")
+async def admin_cases(
+    ok: bool = Depends(require_admin),
+    pool: Pool = Depends(get_pool),
+):
+    cases = await _admin_list_cases(pool, limit=500)
+    return {"cases": cases}
+
+@app.post("/admin/users/enable-by-email")
+async def admin_enable_user_by_email(
+    req: EnableByEmail,
+    ok: bool = Depends(require_admin),
+    pool: Pool = Depends(get_pool),
+):
+    updated = await _admin_set_user_flags_by_email(pool, req.email, req.is_active, req.is_approved)
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"ok": True, "email": (req.email or "").strip().lower()}
+
+@app.get("/admin/pending-users")
+async def admin_pending_users(
+    ok: bool = Depends(require_admin),
+    pool: Pool = Depends(get_pool),
+):
+    users = await _admin_list_users(pool, status="pending", limit=200)
+    return users
+
+>>>>>>> 30d16ff (Temp pass)
 @app.post("/admin/approve-user/{email}", response_model=ApproveOut)
 async def admin_approve_user(
     email: str,
