@@ -556,23 +556,71 @@ def _row_to_event(row: asyncpg.Record) -> Dict[str, Any]:
     }
 
 
-async def list_users(pool: asyncpg.Pool, status: str = "all", limit: int = 200) -> List[Dict[str, Any]]:
-    """status: all | pending | approved"""
-    where = ""
-    if status == "pending":
-        where = "WHERE is_approved = false"
-    elif status == "approved":
-        where = "WHERE is_approved = true"
-    q = f"""
-        SELECT id, name, email, phone, occupation, company, extras, is_active, is_approved, must_change_password, created_at
-        FROM users
-        {where}
-        ORDER BY created_at DESC
-        LIMIT $1
-    """
+async def list_users(pool, status: str | None = None, limit: int = 500):
     async with pool.acquire() as con:
-        rows = await con.fetch(q, limit)
-        return [dict(r) for r in rows]
+        if status == "pending":
+            q = """
+                SELECT
+                    name,
+                    email,
+                    phone,
+                    occupation,
+                    company,
+                    extras,
+                    is_active,
+                    is_approved,
+                    must_change_password,
+                    requested_at,
+                    approved_at
+                FROM users
+                WHERE is_approved = FALSE
+                ORDER BY requested_at DESC
+                LIMIT $1
+            """
+            rows = await con.fetch(q, limit)
+
+        elif status == "approved":
+            q = """
+                SELECT
+                    name,
+                    email,
+                    phone,
+                    occupation,
+                    company,
+                    extras,
+                    is_active,
+                    is_approved,
+                    must_change_password,
+                    requested_at,
+                    approved_at
+                FROM users
+                WHERE is_approved = TRUE
+                ORDER BY approved_at DESC NULLS LAST
+                LIMIT $1
+            """
+            rows = await con.fetch(q, limit)
+
+        else:
+            q = """
+                SELECT
+                    name,
+                    email,
+                    phone,
+                    occupation,
+                    company,
+                    extras,
+                    is_active,
+                    is_approved,
+                    must_change_password,
+                    requested_at,
+                    approved_at
+                FROM users
+                ORDER BY requested_at DESC
+                LIMIT $1
+            """
+            rows = await con.fetch(q, limit)
+
+    return [dict(r) for r in rows]
 
 
 async def set_user_active(pool: asyncpg.Pool, user_id: str, is_active: bool) -> None:
