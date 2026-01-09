@@ -268,21 +268,67 @@ async def create_case(pool: asyncpg.Pool, user_id: str, title: str, description:
     return _row_to_case(row)
 
 
-async def list_cases(pool: asyncpg.Pool, user_id: str | None, limit: int = 50, offset: int = 0):
+async def list_cases(pool, user_id: Optional[str] = None, limit: int = 500):
+    """
+    List cases.
+    - If user_id is None: list all cases (admin)
+    - If user_id provided: filter by cases.user_id (uuid)
+    """
+    # Normalize user_id
+    if user_id in (None, "", "None", "none", "null", "NULL"):
+        user_uuid = None
+    else:
+        try:
+            user_uuid = uuid.UUID(str(user_id))
+        except Exception:
+            user_uuid = None
+
     async with pool.acquire() as con:
-        rows = await con.fetch(
-            """
-            SELECT id, user_id, title, description, status, created_at
-            FROM cases
-            WHERE ($1::text IS NULL OR user_id = $1)
-            ORDER BY created_at DESC
-            LIMIT $2 OFFSET $3;
-            """,
-            (uuid.UUID(user_id) if user_id else None),
-            limit,
-            offset,
-        )
-    return [_row_to_case(r) for r in rows]
+        if user_uuid is None:
+            rows = await con.fetch(
+                """
+                SELECT
+                  id,
+                  user_id,
+                  title,
+                  description,
+                  status,
+                  created_at
+                FROM cases
+                ORDER BY created_at DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+        else:
+            rows = await con.fetch(
+                """
+                SELECT
+                  id,
+                  user_id,
+                  title,
+                  description,
+                  status,
+                  created_at
+                FROM cases
+                WHERE user_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                user_uuid, limit,
+            )
+
+    out = []
+    for r in rows:
+        out.append({
+            "id": str(r["id"]) if r.get("id") else None,
+            "user_id": str(r["user_id"]) if r.get("user_id") else None,
+            "title": r.get("title"),
+            "description": r.get("description"),
+            "status": r.get("status"),
+            "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+        })
+    return out
 
 
 async def get_case(pool: asyncpg.Pool, user_id: str, case_id: str) -> Optional[Dict[str, Any]]:
@@ -334,41 +380,106 @@ async def add_evidence(
     return _row_to_evidence(row)
 
 
-async def list_evidence(pool: asyncpg.Pool, case_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+async def list_evidence(pool, case_id: Optional[str] = None, limit: int = 500):
+    """
+    List evidence.
+    - If case_id is None: list all evidence (admin)
+    - If case_id provided: filter by evidence.case_id (uuid)
+    """
+    if case_id in (None, "", "None", "none", "null", "NULL"):
+        case_uuid = None
+    else:
+        try:
+            case_uuid = uuid.UUID(str(case_id))
+        except Exception:
+            case_uuid = None
+
     async with pool.acquire() as con:
-        rows = await con.fetch(
-            """
-            SELECT id, case_id, filename, sha256, media_type, bytes, provenance_state, summary, created_at
-            FROM evidence
-            WHERE case_id = $1
-            ORDER BY created_at DESC
-            LIMIT $2;
-            """,
-            uuid.UUID(case_id),
-            limit,
-        )
-    return [_row_to_evidence(r) for r in rows]
+        if case_uuid is None:
+            rows = await con.fetch(
+                """
+                SELECT
+                  id,
+                  case_id,
+                  filename,
+                  sha256,
+                  media_type,
+                  bytes,
+                  provenance_state,
+                  summary,
+                  analysis_json AS analysis,
+                  created_at
+                FROM evidence
+                ORDER BY created_at DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+        else:
+            rows = await con.fetch(
+                """
+                SELECT
+                  id,
+                  case_id,
+                  filename,
+                  sha256,
+                  media_type,
+                  bytes,
+                  provenance_state,
+                  summary,
+                  analysis_json AS analysis,
+                  created_at
+                FROM evidence
+                WHERE case_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                case_uuid, limit,
+            )
+
+    out = []
+    for r in rows:
+        out.append({
+            "id": str(r["id"]) if r.get("id") else None,
+            "case_id": str(r["case_id"]) if r.get("case_id") else None,
+            "filename": r.get("filename"),
+            "sha256": r.get("sha256"),
+            "media_type": r.get("media_type"),
+            "bytes": int(r["bytes"]) if r.get("bytes") is not None else None,
+            "provenance_state": r.get("provenance_state"),
+            "summary": r.get("summary"),
+            "analysis": r.get("analysis") or {},
+            "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+        })
+    return out
 
 
-async def get_evidence(pool: asyncpg.Pool, case_id: str, evidence_id: str) -> Optional[Dict[str, Any]]:
+async def get_evidence(pool, evidence_id: str):
+    try:
+        ev_uuid = uuid.UUID(str(evidence_id))
+    except Exception:
+        return None
+
     async with pool.acquire() as con:
         row = await con.fetchrow(
             """
-            SELECT id, case_id, filename, sha256, media_type, bytes, provenance_state, summary, analysis_json, created_at
+            SELECT
+              id,
+              case_id,
+              filename,
+              sha256,
+              media_type,
+              bytes,
+              provenance_state,
+              summary,
+              analysis_json AS analysis,
+              created_at
             FROM evidence
-            WHERE case_id = $1 AND id = $2;
+            WHERE id = $1
             """,
-            uuid.UUID(case_id),
-            uuid.UUID(evidence_id),
+            ev_uuid,
         )
-    if not row:
-        return None
-    d = _row_to_evidence(row)
-    try:
-        d["analysis"] = row["analysis_json"] if isinstance(row["analysis_json"], dict) else json.loads(row["analysis_json"] or "{}")
-    except Exception:
-        d["analysis"] = {}
-    return d
+    return dict(row) if row else None
 
 
 async def add_event(
@@ -625,7 +736,12 @@ async def list_users(pool, status: str | None = None, limit: int = 500):
 
 async def set_user_active(pool: asyncpg.Pool, user_id: str, is_active: bool) -> None:
     async with pool.acquire() as con:
-        await con.execute("UPDATE users SET is_active=$2 WHERE id=$1", user_id, is_active)
+        await con.execute(
+            "UPDATE users SET is_active=$2 WHERE id=$1",
+            uuid.UUID(user_id),
+            is_active,
+        )
+
 
 
 async def counts_overview(pool: asyncpg.Pool) -> Dict[str, int]:
