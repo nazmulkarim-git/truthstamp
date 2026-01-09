@@ -53,6 +53,7 @@ export default function HomePage() {
     return { label: s || "—", cls: "border-slate-200 bg-slate-100 text-slate-800" };
   }, [result?.provenance_state]);
 
+
   async function quickScan() {
     if (!file) return;
     setBusy(true);

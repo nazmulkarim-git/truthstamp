@@ -734,31 +734,23 @@ async def list_users(pool, status: str | None = None, limit: int = 500):
     return [dict(r) for r in rows]
 
 
-async def set_user_active(pool, user_identifier: str, is_active: bool) -> None:
-    """
-    Enable / disable a user.
-    Accepts either:
-      - UUID (users.id)
-      - Email address (users.email)
-    """
-
+async def set_user_active(pool, email: str, active: bool):
     async with pool.acquire() as con:
-        # Try UUID first
-        try:
-            user_uuid = uuid.UUID(str(user_identifier))
-            await con.execute(
-                "UPDATE users SET is_active=$2 WHERE id=$1",
-                user_uuid,
-                is_active,
-            )
-        except ValueError:
-            # Not a UUID → assume it's email
-            await con.execute(
-                "UPDATE users SET is_active=$2 WHERE email=$1",
-                user_identifier.lower().strip(),
-                is_active,
-            )
+        row = await con.fetchrow(
+            "UPDATE users SET is_active=$2 WHERE email=$1 RETURNING email",
+            email, active
+        )
+        if not row:
+            raise ValueError("User not found")
 
+async def set_user_approved(pool, email: str, approved: bool):
+    async with pool.acquire() as con:
+        row = await con.fetchrow(
+            "UPDATE users SET is_approved=$2, approved_at=NOW() WHERE email=$1 RETURNING email",
+            email, approved
+        )
+        if not row:
+            raise ValueError("User not found")
 
 
 async def counts_overview(pool: asyncpg.Pool) -> Dict[str, int]:

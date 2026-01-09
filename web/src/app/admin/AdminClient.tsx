@@ -25,6 +25,9 @@ type Overview = {
   recent_events: any[];
 };
 
+type AdminUser = { name: string; email: string; is_active: boolean; is_approved: boolean };
+
+
 async function apiFetch(path: string, adminKey: string, init?: RequestInit) {
   const res = await fetch(`${API}${path}`, {
     ...init,
@@ -118,19 +121,22 @@ export default function AdminClient() {
     }
   }
 
-  async function enableUser(userId: string) {
-    if (!adminKey) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      await apiFetch(`/admin/users/${userId}/enable`, adminKey, { method: "POST" });
-      await refreshAll(adminKey);
-    } catch (e: any) {
-      setErr(e?.message || "Enable failed");
-    } finally {
-      setBusy(false);
-    }
+  async function enableUser(email: string) {
+  const adminKey = localStorage.getItem("truthstamp_admin_key") || "";
+  const res = await fetch(`${API_URL}/admin/users/enable-by-email`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Admin-Key": adminKey,
+    },
+    body: JSON.stringify({ email, is_active: true, is_approved: true }),
+  });
+
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(t || `Enable failed (${res.status})`);
   }
+}
 
   function saveKey() {
     const k = adminKey.trim();
@@ -294,9 +300,8 @@ export default function AdminClient() {
                           Disable
                         </Button>
                       ) : (
-                        <Button variant="ghost" onClick={() => enableUser(u.id)} disabled={busy}>
-                          Enable
-                        </Button>
+                        <Button onClick={() => enableUser(u.email)}>Enable</Button>
+
                       )}
                     </div>
                   </div>

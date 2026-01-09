@@ -11,7 +11,7 @@ from typing import Optional, Any, Dict, List
 
 import jwt
 from asyncpg import Pool
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form, Request, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form, Request, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -89,12 +89,11 @@ def get_pool() -> Pool:
 # -----------------------------
 ADMIN_API_KEY = os.getenv("TRUTHSTAMP_ADMIN_API_KEY", "")
 
-def require_admin(request: Request) -> None:
-    if not ADMIN_API_KEY:
-        raise HTTPException(status_code=500, detail="Admin API key not configured")
-    key = request.headers.get("x-admin-key") or request.headers.get("X-Admin-Key")
-    if not key or not hmac.compare_digest(key.strip(), ADMIN_API_KEY):
-        raise HTTPException(status_code=401, detail="Missing/invalid admin key")
+def require_admin(x_admin_key: str = Header(default="")):
+    expected = os.getenv("TRUTHSTAMP_ADMIN_API_KEY", "")
+    if not expected or x_admin_key != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return True
 
 async def _get_case_admin(pool: Pool, case_id: str) -> Optional[Dict[str, Any]]:
     # Admin needs to fetch any case without user_id filter.
@@ -164,6 +163,17 @@ async def admin_case_detail(case_id: str, request: Request, pool: Pool = Depends
     events = await db.list_events(pool, case_id)
     return {"case": c, "evidence": ev, "events": events}
 
+@app.post("/admin/users/enable-by-email")
+async def admin_enable_user_by_email(
+    req: EnableByEmail,
+    ok: bool = Depends(require_admin),
+    pool=Depends(get_pool),
+):
+    # Approve + enable in one action
+    await db.set_user_approved(pool, req.email, req.is_approved)
+    await db.set_user_active(pool, req.email, req.is_active)
+    return {"ok": True, "email": req.email}
+
 # -----------------------------
 # Auth (PBKDF2-HMAC-SHA256 + JWT)
 # -----------------------------
@@ -199,6 +209,11 @@ class AuthIn(BaseModel):
 class AuthOut(BaseModel):
     token: str
     user: dict
+
+class EnableByEmail(BaseModel):
+    email: str
+    is_active: bool = True
+    is_approved: bool = True
 
 class AccessRequestIn(BaseModel):
     name: str = Field(min_length=2, max_length=120)
