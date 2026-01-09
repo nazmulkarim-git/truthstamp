@@ -734,13 +734,30 @@ async def list_users(pool, status: str | None = None, limit: int = 500):
     return [dict(r) for r in rows]
 
 
-async def set_user_active(pool: asyncpg.Pool, user_id: str, is_active: bool) -> None:
+async def set_user_active(pool, user_identifier: str, is_active: bool) -> None:
+    """
+    Enable / disable a user.
+    Accepts either:
+      - UUID (users.id)
+      - Email address (users.email)
+    """
+
     async with pool.acquire() as con:
-        await con.execute(
-            "UPDATE users SET is_active=$2 WHERE id=$1",
-            uuid.UUID(user_id),
-            is_active,
-        )
+        # Try UUID first
+        try:
+            user_uuid = uuid.UUID(str(user_identifier))
+            await con.execute(
+                "UPDATE users SET is_active=$2 WHERE id=$1",
+                user_uuid,
+                is_active,
+            )
+        except ValueError:
+            # Not a UUID → assume it's email
+            await con.execute(
+                "UPDATE users SET is_active=$2 WHERE email=$1",
+                user_identifier.lower().strip(),
+                is_active,
+            )
 
 
 
