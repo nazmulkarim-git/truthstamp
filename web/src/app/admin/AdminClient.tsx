@@ -299,11 +299,12 @@ export default function AdminClient() {
                     <div className="flex items-center gap-2">
                       {u.is_active ? (
                         <Button variant="ghost" onClick={() => disableUser(u.id)} disabled={busy}>
-                          Disable
+                        Disable
                         </Button>
-                      ) : (
-                        <Button onClick={() => enableUser(u.email)}>Enable</Button>
-
+                        ) : (
+                        <Button onClick={() => enableUser(u.email)} disabled={busy}>
+                         Enable
+                        </Button>
                       )}
                     </div>
                   </div>

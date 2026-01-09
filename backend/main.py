@@ -10,8 +10,19 @@ import secrets
 from typing import Optional, Any, Dict, List
 
 import jwt
+import asyncpg
 from asyncpg import Pool
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form, Request, Depends, Header
+from fastapi import (
+    FastAPI,
+    UploadFile,
+    File,
+    HTTPException,
+    BackgroundTasks,
+    Form,
+    Request,
+    Depends,
+    Header,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -87,93 +98,44 @@ def get_pool() -> Pool:
 # -----------------------------
 # Admin auth (header x-admin-key)
 # -----------------------------
-ADMIN_API_KEY = os.getenv("TRUTHSTAMP_ADMIN_API_KEY", "")
-
-def require_admin(x_admin_key: str = Header(default="")):
+def require_admin(x_admin_key: str = Header(default="", alias="x-admin-key")) -> bool:
     expected = os.getenv("TRUTHSTAMP_ADMIN_API_KEY", "")
     if not expected or x_admin_key != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return True
 
+# -----------------------------
+# Schemas
+# -----------------------------
+class AuthIn(BaseModel):
+    email: str
+    password: str
 
-async def _get_case_admin(pool: Pool, case_id: str) -> Optional[Dict[str, Any]]:
-    # Admin needs to fetch any case without user_id filter.
-    import uuid
-    try:
-        cid = uuid.UUID(case_id)
-    except Exception:
-        return None
-    async with pool.acquire() as con:
-        row = await con.fetchrow(
-            """
-            SELECT id, user_id, title, description, status, created_at
-            FROM cases
-            WHERE id = $1
-            """,
-            cid,
-        )
-    if not row:
-        return None
-    return {
-        "id": str(row["id"]),
-        "user_id": str(row["user_id"]),
-        "title": row["title"],
-        "description": row["description"],
-        "status": row["status"],
-        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-    }
+class AuthOut(BaseModel):
+    token: str
+    user: dict
 
-@app.get("/admin/overview")
-async def admin_overview(request: Request, pool: Pool = Depends(get_pool)):
-    require_admin(request)
-    counts = await db.counts_overview(pool)
-    recent_events = await db.list_events(pool, case_id=None, limit=50)
-    return {"counts": counts, "recent_events": recent_events}
+class EnableByEmail(BaseModel):
+    email: str
+    is_active: bool = True
+    is_approved: bool = True
 
-@app.get("/admin/users")
-async def admin_users(request: Request, status: str = "all", pool: Pool = Depends(get_pool)):
-    require_admin(request)
-    users = await db.list_users(pool, status=status, limit=500)
-    return {"users": users}
+class AccessRequestIn(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    email: str
+    phone: str | None = Field(default=None, max_length=50)
+    occupation: str | None = Field(default=None, max_length=120)
+    company: str | None = Field(default=None, max_length=200)
+    notes: str | None = Field(default=None, max_length=500)
+    use_case: str | None = Field(default=None, max_length=200)
 
-@app.post("/admin/users/{user_id}/disable")
-async def admin_disable_user(user_id: str, request: Request, pool: Pool = Depends(get_pool)):
-    require_admin(request)
-    await db.set_user_active(pool, user_id, False)
-    return {"ok": True}
+class ChangePasswordIn(BaseModel):
+    old_password: str | None = None
+    new_password: str = Field(min_length=8, max_length=200)
 
-@app.post("/admin/users/{user_id}/enable")
-async def admin_enable_user(user_id: str, request: Request, pool: Pool = Depends(get_pool)):
-    require_admin(request)
-    await db.set_user_active(pool, user_id, True)
-    return {"ok": True}
-
-@app.get("/admin/cases")
-async def admin_cases(request: Request, pool: Pool = Depends(get_pool)):
-    require_admin(request)
-    cases = await db.list_cases(pool, user_id=None, limit=500)
-    return {"cases": cases}
-
-@app.get("/admin/cases/{case_id}")
-async def admin_case_detail(case_id: str, request: Request, pool: Pool = Depends(get_pool)):
-    require_admin(request)
-    c = await _get_case_admin(pool, case_id)
-    if not c:
-        raise HTTPException(status_code=404, detail="Case not found")
-    ev = await db.list_evidence(pool, case_id)
-    events = await db.list_events(pool, case_id)
-    return {"case": c, "evidence": ev, "events": events}
-
-@app.post("/admin/users/enable-by-email")
-async def admin_enable_user_by_email(
-    req: EnableByEmail,
-    ok: bool = Depends(require_admin),
-    pool=Depends(get_pool),
-):
-    await db.set_user_approved(pool, req.email, req.is_approved)
-    await db.set_user_active(pool, req.email, req.is_active)
-    return {"ok": True, "email": req.email}
-
+class ApproveOut(BaseModel):
+    ok: bool
+    email_sent: bool
 
 # -----------------------------
 # Auth (PBKDF2-HMAC-SHA256 + JWT)
@@ -203,37 +165,6 @@ def _verify_password(password: str, stored: str) -> bool:
     except Exception:
         return False
 
-class AuthIn(BaseModel):
-    email: str
-    password: str
-
-class AuthOut(BaseModel):
-    token: str
-    user: dict
-
-class EnableByEmail(BaseModel):
-    email: str
-    is_active: bool = True
-    is_approved: bool = True
-
-
-class AccessRequestIn(BaseModel):
-    name: str = Field(min_length=2, max_length=120)
-    email: str
-    phone: str | None = Field(default=None, max_length=50)
-    occupation: str | None = Field(default=None, max_length=120)
-    company: str | None = Field(default=None, max_length=200)
-    notes: str | None = Field(default=None, max_length=500)
-    use_case: str | None = Field(default=None, max_length=200)
-
-class ChangePasswordIn(BaseModel):
-    old_password: str | None = None
-    new_password: str = Field(min_length=8, max_length=200)
-
-class AdminEnableUserRequest(BaseModel):
-    email: str
-    is_active: bool = True
-
 def _create_token(user_id: str, email: str) -> str:
     now = datetime.datetime.utcnow()
     exp = now + datetime.timedelta(hours=JWT_TTL_HOURS)
@@ -253,6 +184,10 @@ def _sanitize_user(u: dict) -> dict:
         "company": u.get("company"),
         "extras": u.get("extras") or {},
         "must_change_password": bool(u.get("must_change_password")),
+        "is_active": bool(u.get("is_active")),
+        "is_approved": bool(u.get("is_approved")),
+        "requested_at": u.get("requested_at"),
+        "approved_at": u.get("approved_at"),
     }
 
 async def get_current_user_async(request: Request, pool: Pool = Depends(get_pool)) -> dict:
@@ -290,16 +225,265 @@ async def get_optional_user_async(request: Request, pool: Pool = Depends(get_poo
     except Exception:
         return None
 
-@app.post("/admin/users/enable")
-async def admin_enable_user_by_email(req: AdminEnableUserRequest, pool=Depends(get_pool), ok=Depends(require_admin)):
-    await db.set_user_active(pool, req.email, req.is_active)
+# -----------------------------
+# Health
+# -----------------------------
+@app.get("/health")
+def health():
+    return {"ok": True, "service": "truthstamp-api"}
+
+def _too_big(nbytes: int) -> bool:
+    return nbytes > MAX_MB * 1024 * 1024
+
+def _cleanup_file(path: Optional[str]) -> None:
+    if not path:
+        return
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+# -----------------------------
+# ADMIN: use direct SQL matching your schemas
+#   events.details_json (jsonb)
+#   users.requested_at / approved_at
+# -----------------------------
+async def _admin_counts(pool: Pool) -> dict:
+    async with pool.acquire() as con:
+        users_total = await con.fetchval("SELECT COUNT(*) FROM users")
+        users_pending = await con.fetchval("SELECT COUNT(*) FROM users WHERE is_approved = FALSE")
+        cases_total = await con.fetchval("SELECT COUNT(*) FROM cases")
+        evidence_total = await con.fetchval("SELECT COUNT(*) FROM evidence")
+        events_total = await con.fetchval("SELECT COUNT(*) FROM events")
+    return {
+        "users_total": int(users_total or 0),
+        "users_pending": int(users_pending or 0),
+        "cases_total": int(cases_total or 0),
+        "evidence_total": int(evidence_total or 0),
+        "events_total": int(events_total or 0),
+    }
+
+async def _admin_recent_events(pool: Pool, limit: int = 50) -> list[dict]:
+    async with pool.acquire() as con:
+        rows = await con.fetch(
+            """
+            SELECT id, case_id, evidence_id, event_type, actor, ip, user_agent, details_json, created_at
+            FROM events
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    out = []
+    for r in rows:
+        out.append(
+            {
+                "id": str(r["id"]),
+                "case_id": str(r["case_id"]) if r["case_id"] else None,
+                "evidence_id": str(r["evidence_id"]) if r["evidence_id"] else None,
+                "event_type": r["event_type"],
+                "actor": r["actor"],
+                "ip": r["ip"],
+                "user_agent": r["user_agent"],
+                "details": r["details_json"] or {},
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+        )
+    return out
+
+async def _admin_list_users(pool: Pool, status: str = "all", limit: int = 500) -> list[dict]:
+    where = ""
+    params: list[Any] = [limit]
+    if status == "pending":
+        where = "WHERE is_approved = FALSE"
+    elif status == "approved":
+        where = "WHERE is_approved = TRUE"
+    elif status == "disabled":
+        where = "WHERE is_active = FALSE"
+
+    q = f"""
+        SELECT name, email, phone, occupation, company, extras,
+               is_active, is_approved, must_change_password,
+               requested_at, approved_at
+        FROM users
+        {where}
+        ORDER BY requested_at DESC NULLS LAST
+        LIMIT $1
+    """
+    async with pool.acquire() as con:
+        rows = await con.fetch(q, *params)
+
+    out = []
+    for r in rows:
+        out.append(
+            {
+                "name": r["name"],
+                "email": r["email"],
+                "phone": r["phone"],
+                "occupation": r["occupation"],
+                "company": r["company"],
+                "extras": r["extras"] or {},
+                "is_active": bool(r["is_active"]),
+                "is_approved": bool(r["is_approved"]),
+                "must_change_password": bool(r["must_change_password"]),
+                "requested_at": r["requested_at"].isoformat() if r["requested_at"] else None,
+                "approved_at": r["approved_at"].isoformat() if r["approved_at"] else None,
+            }
+        )
+    return out
+
+async def _admin_list_cases(pool: Pool, limit: int = 500) -> list[dict]:
+    async with pool.acquire() as con:
+        rows = await con.fetch(
+            """
+            SELECT id, user_id, title, description, status, created_at
+            FROM cases
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    out = []
+    for r in rows:
+        out.append(
+            {
+                "id": str(r["id"]),
+                "user_id": str(r["user_id"]) if r["user_id"] else None,
+                "title": r["title"],
+                "description": r["description"],
+                "status": r["status"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+        )
+    return out
+
+async def _admin_set_user_flags_by_email(pool: Pool, email: str, is_active: bool, is_approved: bool) -> bool:
+    email_norm = (email or "").strip().lower()
+    if not email_norm or "@" not in email_norm:
+        raise HTTPException(status_code=422, detail="Invalid email")
+    async with pool.acquire() as con:
+        res = await con.execute(
+            """
+            UPDATE users
+            SET is_active = $2,
+                is_approved = $3,
+                approved_at = CASE WHEN $3 = TRUE THEN COALESCE(approved_at, NOW()) ELSE approved_at END
+            WHERE email = $1
+            """,
+            email_norm,
+            is_active,
+            is_approved,
+        )
+    # asyncpg returns like: "UPDATE 1"
+    return res.endswith("1")
+
+@app.get("/admin/overview")
+async def admin_overview(
+    ok: bool = Depends(require_admin),
+    pool: Pool = Depends(get_pool),
+):
+    counts = await _admin_counts(pool)
+    recent_events = await _admin_recent_events(pool, limit=50)
+    return {"counts": counts, "recent_events": recent_events}
+
+@app.get("/admin/users")
+async def admin_users(
+    status: str = "all",
+    ok: bool = Depends(require_admin),
+    pool: Pool = Depends(get_pool),
+):
+    users = await _admin_list_users(pool, status=status, limit=500)
+    return {"users": users}
+
+@app.get("/admin/cases")
+async def admin_cases(
+    ok: bool = Depends(require_admin),
+    pool: Pool = Depends(get_pool),
+):
+    cases = await _admin_list_cases(pool, limit=500)
+    return {"cases": cases}
+
+@app.post("/admin/users/enable-by-email")
+async def admin_enable_user_by_email(
+    req: EnableByEmail,
+    pool: Pool = Depends(get_pool),
+    _: None = Depends(require_admin),
+):
+    user = await db.get_user_by_email(pool, req.email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    await db.set_user_active(pool, user["id"], req.is_active)
+    await db.set_user_approved(pool, user["id"], req.is_approved)
+
     return {"ok": True}
 
-async def register(payload: AccessRequestIn, pool: Pool = Depends(get_pool)):
-    """Invite-only registration.
+@app.get("/admin/pending-users")
+async def admin_pending_users(
+    ok: bool = Depends(require_admin),
+    pool: Pool = Depends(get_pool),
+):
+    users = await _admin_list_users(pool, status="pending", limit=200)
+    return users
 
-    Creates a pending access request. An admin approves and emails a temporary password.
-    """
+@app.post("/admin/approve-user/{email}", response_model=ApproveOut)
+async def admin_approve_user(
+    email: str,
+    ok: bool = Depends(require_admin),
+    pool: Pool = Depends(get_pool),
+):
+    # Approve by email (safer than UUID when UI is buggy)
+    temp_password = secrets.token_urlsafe(9)
+    ph = _hash_password(temp_password)
+
+    # Set flags + password + must_change_password
+    email_norm = (email or "").strip().lower()
+    async with pool.acquire() as con:
+        updated = await con.execute(
+            """
+            UPDATE users
+            SET is_approved = TRUE,
+                is_active = TRUE,
+                must_change_password = TRUE,
+                password_hash = $2,
+                approved_at = COALESCE(approved_at, NOW())
+            WHERE email = $1
+            """,
+            email_norm,
+            ph,
+        )
+    if not updated.endswith("1"):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    email_sent = False
+    if emailer.smtp_configured():
+        try:
+            web_url = os.getenv("TRUTHSTAMP_WEB_URL", "https://truthstamp-web.onrender.com")
+            subject = "Your TruthStamp temporary password"
+            text = (
+                f"Hi,\n\n"
+                "Your TruthStamp account has been approved.\n\n"
+                f"Login: {web_url}/login\n"
+                f"Email: {email_norm}\n"
+                f"Temporary password: {temp_password}\n\n"
+                "After you log in, go to Profile → Change password to set your own password.\n\n"
+                "— TruthStamp"
+            )
+            emailer.send_email(email_norm, subject, text)
+            email_sent = True
+        except Exception as e:
+            print("EMAIL_SEND_ERROR:", repr(e))
+
+    if not email_sent:
+        print("TEMP_PASSWORD_FOR", email_norm, ":", temp_password)
+
+    return {"ok": True, "email_sent": email_sent}
+
+# -----------------------------
+# Invite-only registration endpoints
+# -----------------------------
+async def _register_access_request(payload: AccessRequestIn, pool: Pool):
     email = (payload.email or "").strip().lower()
     if not email or "@" not in email:
         raise HTTPException(status_code=422, detail="Invalid email")
@@ -324,7 +508,7 @@ async def register(payload: AccessRequestIn, pool: Pool = Depends(get_pool)):
 
 @app.post("/auth/request-access")
 async def request_access(payload: AccessRequestIn, pool: Pool = Depends(get_pool)):
-    return await register(payload, pool)
+    return await _register_access_request(payload, pool)
 
 @app.post("/auth/login", response_model=AuthOut)
 async def login(payload: AuthIn, pool: Pool = Depends(get_pool)):
@@ -356,71 +540,6 @@ async def change_password(
     ph = _hash_password(payload.new_password)
     await db.set_user_password(pool, user["id"], ph, must_change_password=False)
     return {"ok": True}
-
-# -----------------------------
-# Admin onboarding: approve pending users
-# -----------------------------
-@app.get("/admin/pending-users")
-async def admin_pending_users(request: Request, pool: Pool = Depends(get_pool)):
-    require_admin(request)
-    users = await db.list_pending_users(pool, limit=100)
-    return [{k: v for k, v in u.items() if k != "password_hash"} for u in users]
-
-class ApproveOut(BaseModel):
-    ok: bool
-    email_sent: bool
-
-@app.post("/admin/approve-user/{user_id}", response_model=ApproveOut)
-async def admin_approve_user(user_id: str, request: Request, pool: Pool = Depends(get_pool)):
-    require_admin(request)
-
-    temp_password = secrets.token_urlsafe(9)  # ~12 chars
-    ph = _hash_password(temp_password)
-    u = await db.approve_user(pool, user_id, password_hash=ph, must_change_password=True)
-
-    email_sent = False
-    if emailer.smtp_configured():
-        try:
-            web_url = os.getenv("TRUTHSTAMP_WEB_URL", "https://truthstamp-web.onrender.com")
-            subject = "Your TruthStamp temporary password"
-            text = (
-                f"Hi {u.get('name') or ''},\n\n"
-                "Your TruthStamp account has been approved.\n\n"
-                f"Login: {web_url}/login\n"
-                f"Email: {u['email']}\n"
-                f"Temporary password: {temp_password}\n\n"
-                "After you log in, go to Profile → Change password to set your own password.\n\n"
-                "— TruthStamp"
-            )
-            emailer.send_email(u["email"], subject, text)
-            email_sent = True
-        except Exception as e:
-            print("EMAIL_SEND_ERROR:", repr(e))
-
-    if not email_sent:
-        # For MVP: reveal temp password in logs if SMTP isn't configured.
-        print("TEMP_PASSWORD_FOR", u["email"], ":", temp_password)
-
-    return {"ok": True, "email_sent": email_sent}
-
-# -----------------------------
-# Health
-# -----------------------------
-@app.get("/health")
-def health():
-    return {"ok": True, "service": "truthstamp-api"}
-
-def _too_big(nbytes: int) -> bool:
-    return nbytes > MAX_MB * 1024 * 1024
-
-def _cleanup_file(path: Optional[str]) -> None:
-    if not path:
-        return
-    try:
-        if os.path.exists(path):
-            os.remove(path)
-    except Exception:
-        pass
 
 # -----------------------------
 # Analysis core
@@ -577,15 +696,6 @@ async def list_case_evidence(case_id: str, limit: int = 200, user=Depends(get_cu
         raise HTTPException(status_code=404, detail="Case not found")
     return await db.list_evidence(pool, case_id, limit=limit)
 
-@app.get("/cases/{case_id}/evidence/{evidence_id}")
-async def get_case_evidence(case_id: str, evidence_id: str, user=Depends(get_current_user_async), pool: Pool = Depends(get_pool)):
-    if not await db.get_case(pool, user["id"], case_id):
-        raise HTTPException(status_code=404, detail="Case not found")
-    evd = await db.get_evidence(pool, case_id, evidence_id)
-    if not evd:
-        raise HTTPException(status_code=404, detail="Evidence not found")
-    return evd
-
 @app.get("/cases/{case_id}/events", response_model=list[EventItem])
 async def list_case_events(case_id: str, limit: int = 200, user=Depends(get_current_user_async), pool: Pool = Depends(get_pool)):
     if not await db.get_case(pool, user["id"], case_id):
@@ -680,20 +790,13 @@ async def report(
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as pf:
             tmp_pdf = pf.name
 
-        # Lazy import so a broken report module doesn't prevent API boot.
         try:
-            from .report import build_pdf_report  # pylint: disable=import-error
+            from .report import build_pdf_report
         except Exception as ie:
             print("REPORT_IMPORT_ERROR:", repr(ie))
             raise HTTPException(status_code=500, detail="Report generator not available")
 
         payload = analysis_model.model_dump()
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except Exception:
-                raise HTTPException(status_code=500, detail="Invalid analysis payload")
-
         build_pdf_report(payload, tmp_pdf)
 
         if case_id:
