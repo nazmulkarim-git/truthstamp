@@ -136,20 +136,30 @@ async def set_user_active(pool, user_identifier, active: bool):
             )
 
 
-async def set_user_approved(pool, email: str, approved: bool):
+async def set_user_approved(pool, user_identifier, approved: bool):
     async with pool.acquire() as con:
-        row = await con.fetchrow(
-            """
-            UPDATE users
-            SET is_approved=$2,
-                approved_at=NOW()
-            WHERE email=$1
-            RETURNING email
-            """,
-            email.lower(), approved
-        )
-        if not row:
-            raise ValueError("User not found")
+        # If identifier is email
+        if isinstance(user_identifier, str) and "@" in user_identifier:
+            await con.execute(
+                """
+                UPDATE users
+                SET is_approved = $2,
+                    approved_at = NOW()
+                WHERE email = $1
+                """,
+                user_identifier.lower(), approved
+            )
+        else:
+            # Assume UUID
+            await con.execute(
+                """
+                UPDATE users
+                SET is_approved = $2,
+                    approved_at = NOW()
+                WHERE id = $1
+                """,
+                user_identifier, approved
+            )
 
 
 async def set_user_password(pool, email: str, password_hash: str, must_change_password: bool):
