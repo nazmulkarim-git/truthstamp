@@ -407,8 +407,7 @@ async def add_event(
 async def list_events(pool, case_id: Optional[str] = None, limit: int = 50):
     """
     Return recent audit/custody events.
-    - If case_id is None: return events across all cases
-    - If case_id is provided: must be UUID; cast safely
+    Uses events.details_json (jsonb) in DB but returns it as "details" in API.
     """
     # Normalize case_id
     if case_id in (None, "", "None", "none", "null", "NULL"):
@@ -417,15 +416,22 @@ async def list_events(pool, case_id: Optional[str] = None, limit: int = 50):
         try:
             case_uuid = uuid.UUID(str(case_id))
         except Exception:
-            # If someone passes garbage, treat as "no filter" OR raise 422.
-            # For admin overview, "no filter" is safer:
             case_uuid = None
 
     async with pool.acquire() as con:
         if case_uuid is None:
             rows = await con.fetch(
                 """
-                SELECT id, case_id, evidence_id, event_type, actor, ip, user_agent, details, created_at
+                SELECT
+                  id,
+                  case_id,
+                  evidence_id,
+                  event_type,
+                  actor,
+                  ip,
+                  user_agent,
+                  details_json AS details,
+                  created_at
                 FROM events
                 ORDER BY created_at DESC
                 LIMIT $1
@@ -435,7 +441,16 @@ async def list_events(pool, case_id: Optional[str] = None, limit: int = 50):
         else:
             rows = await con.fetch(
                 """
-                SELECT id, case_id, evidence_id, event_type, actor, ip, user_agent, details, created_at
+                SELECT
+                  id,
+                  case_id,
+                  evidence_id,
+                  event_type,
+                  actor,
+                  ip,
+                  user_agent,
+                  details_json AS details,
+                  created_at
                 FROM events
                 WHERE case_id = $1
                 ORDER BY created_at DESC
@@ -444,21 +459,27 @@ async def list_events(pool, case_id: Optional[str] = None, limit: int = 50):
                 case_uuid, limit,
             )
 
-    # Convert UUIDs/dicts safely to JSON-friendly structures
     out = []
     for r in rows:
+        details = r.get("details") or {}
+        # asyncpg returns jsonb as dict already, but guard anyway
+        if not isinstance(details, dict):
+            details = {"raw": details}
+
         out.append({
-            "id": str(r["id"]) if r.get("id") is not None else None,
-            "case_id": str(r["case_id"]) if r.get("case_id") is not None else None,
-            "evidence_id": str(r["evidence_id"]) if r.get("evidence_id") is not None else None,
+            "id": str(r["id"]) if r.get("id") else None,
+            "case_id": str(r["case_id"]) if r.get("case_id") else None,
+            "evidence_id": str(r["evidence_id"]) if r.get("evidence_id") else None,
             "event_type": r.get("event_type"),
             "actor": r.get("actor"),
             "ip": r.get("ip"),
             "user_agent": r.get("user_agent"),
-            "details": r.get("details") if isinstance(r.get("details"), dict) else (r.get("details") or {}),
-            "created_at": r["created_at"].isoformat() if r.get("created_at") is not None else None,
+            "details": details,
+            "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
         })
+
     return out
+
 
 
 # -----------------------------
