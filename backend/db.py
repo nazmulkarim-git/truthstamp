@@ -404,20 +404,61 @@ async def add_event(
     return _row_to_event(row)
 
 
-async def list_events(pool: asyncpg.Pool, case_id: str | None, limit: int = 200) -> List[Dict[str, Any]]:
+async def list_events(pool, case_id: Optional[str] = None, limit: int = 50):
+    """
+    Return recent audit/custody events.
+    - If case_id is None: return events across all cases
+    - If case_id is provided: must be UUID; cast safely
+    """
+    # Normalize case_id
+    if case_id in (None, "", "None", "none", "null", "NULL"):
+        case_uuid = None
+    else:
+        try:
+            case_uuid = uuid.UUID(str(case_id))
+        except Exception:
+            # If someone passes garbage, treat as "no filter" OR raise 422.
+            # For admin overview, "no filter" is safer:
+            case_uuid = None
+
     async with pool.acquire() as con:
-        rows = await con.fetch(
-            """
-            SELECT id, case_id, evidence_id, event_type, actor, ip, user_agent, details_json, created_at
-            FROM events
-            WHERE ($1::text IS NULL OR case_id = $1)
-            ORDER BY created_at DESC
-            LIMIT $2;
-            """,
-            (uuid.UUID(case_id) if case_id else None),
-            limit,
-        )
-    return [_row_to_event(r) for r in rows]
+        if case_uuid is None:
+            rows = await con.fetch(
+                """
+                SELECT id, case_id, evidence_id, event_type, actor, ip, user_agent, details, created_at
+                FROM events
+                ORDER BY created_at DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+        else:
+            rows = await con.fetch(
+                """
+                SELECT id, case_id, evidence_id, event_type, actor, ip, user_agent, details, created_at
+                FROM events
+                WHERE case_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                case_uuid, limit,
+            )
+
+    # Convert UUIDs/dicts safely to JSON-friendly structures
+    out = []
+    for r in rows:
+        out.append({
+            "id": str(r["id"]) if r.get("id") is not None else None,
+            "case_id": str(r["case_id"]) if r.get("case_id") is not None else None,
+            "evidence_id": str(r["evidence_id"]) if r.get("evidence_id") is not None else None,
+            "event_type": r.get("event_type"),
+            "actor": r.get("actor"),
+            "ip": r.get("ip"),
+            "user_agent": r.get("user_agent"),
+            "details": r.get("details") if isinstance(r.get("details"), dict) else (r.get("details") or {}),
+            "created_at": r["created_at"].isoformat() if r.get("created_at") is not None else None,
+        })
+    return out
 
 
 # -----------------------------
