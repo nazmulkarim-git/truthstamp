@@ -499,3 +499,82 @@ async def get_case(
             user_id,
         )
     return dict(row) if row else None
+
+async def list_case_evidence(pool: asyncpg.Pool, case_id: str):
+    async with pool.acquire() as con:
+        rows = await con.fetch(
+            """
+            SELECT id, case_id, filename, sha256, media_type, bytes,
+                   provenance_state, summary, analysis_json, created_at
+            FROM evidence
+            WHERE case_id = $1
+            ORDER BY created_at DESC
+            """,
+            case_id,
+        )
+    return [dict(r) for r in rows]
+
+
+async def insert_evidence(
+    pool: asyncpg.Pool,
+    *,
+    case_id: str,
+    filename: str,
+    sha256: str,
+    media_type: str,
+    bytes_: int,
+    provenance_state: str,
+    summary: str,
+    analysis_json: dict,
+):
+    evidence_id = uuid.uuid4()
+    created_at = datetime.now(timezone.utc)
+
+    async with pool.acquire() as con:
+        row = await con.fetchrow(
+            """
+            INSERT INTO evidence (
+                id, case_id, filename, sha256, media_type, bytes,
+                provenance_state, summary, analysis_json, created_at
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10)
+            RETURNING id, case_id, filename, sha256, media_type, bytes,
+                      provenance_state, summary, analysis_json, created_at
+            """,
+            evidence_id,
+            case_id,
+            filename,
+            sha256,
+            media_type,
+            bytes_,
+            provenance_state,
+            summary,
+            json.dumps(analysis_json),
+            created_at,
+        )
+    return dict(row)
+
+
+async def list_case_events(pool: asyncpg.Pool, case_id: str, limit: int = 50):
+    """
+    You don't have an events table, so we derive a basic timeline from evidence.
+    This keeps the UI unbroken and still useful.
+    """
+    evidence = await list_case_evidence(pool, case_id)
+    events = []
+    for e in evidence[:limit]:
+        events.append(
+            {
+                "type": "evidence_added",
+                "at": e["created_at"],
+                "title": f"Evidence uploaded: {e['filename']}",
+                "meta": {
+                    "evidence_id": str(e["id"]),
+                    "sha256": e["sha256"],
+                    "media_type": e["media_type"],
+                    "bytes": e["bytes"],
+                    "provenance_state": e["provenance_state"],
+                },
+            }
+        )
+    return events

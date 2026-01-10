@@ -124,6 +124,9 @@ class CreateCaseReq(BaseModel):
     title: str
     description: Optional[str] = None
 
+class ReportReq(BaseModel):
+    case_id: str
+
 
 app = FastAPI(title="TruthStamp API", version="1.0.0")
 
@@ -487,3 +490,158 @@ async def get_case(
     if not c:
         raise HTTPException(status_code=404, detail="Case not found")
     return c
+
+@app.get("/cases/{case_id}/evidence")
+async def list_case_evidence(
+    case_id: str,
+    pool=Depends(get_pool),
+    creds: HTTPAuthorizationCredentials | None = Depends(bearer),
+):
+    # Ensure the user owns this case
+    user = await require_user(pool, creds)
+
+    c = await db.get_case(pool, case_id=case_id, user_id=str(user["id"]))
+    if not c:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    return await db.list_case_evidence(pool, case_id=case_id)
+
+@app.get("/cases/{case_id}/evidence")
+async def get_case_evidence(
+    case_id: str,
+    pool=Depends(get_pool),
+    creds: HTTPAuthorizationCredentials | None = Depends(bearer),
+):
+    user = await require_user(pool, creds)
+
+    c = await db.get_case(pool, case_id=case_id, user_id=str(user["id"]))
+    if not c:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    return await db.list_case_evidence(pool, case_id)
+
+@app.post("/cases/{case_id}/evidence")
+async def upload_case_evidence(
+    case_id: str,
+    file: UploadFile = File(...),
+    pool=Depends(get_pool),
+    creds: HTTPAuthorizationCredentials | None = Depends(bearer),
+):
+    user = await require_user(pool, creds)
+
+    c = await db.get_case(pool, case_id=case_id, user_id=str(user["id"]))
+    if not c:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    # Save upload to temp file
+    suffix = ""
+    if file.filename:
+        _, ext = os.path.splitext(file.filename)
+        suffix = ext or ""
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp_path = tmp.name
+            content = await file.read()
+            tmp.write(content)
+
+        bytes_ = os.path.getsize(tmp_path)
+        sha256 = sha256_file(tmp_path)
+
+        media_type = engine.detect_media_type(tmp_path)
+        metadata = engine.extract_exiftool(tmp_path)
+        ffprobe = engine.extract_ffprobe(tmp_path) if media_type.startswith("video/") else {}
+        c2pa = engine.extract_c2pa(tmp_path)
+
+        provenance_state, summary = engine.classify_provenance(c2pa, metadata)
+
+        analysis_json = {
+            "media_type": media_type,
+            "sha256": sha256,
+            "bytes": bytes_,
+            "provenance_state": provenance_state,
+            "summary": summary,
+            "c2pa": c2pa,
+            "metadata": metadata,
+            "ffprobe": ffprobe,
+        }
+
+        row = await db.insert_evidence(
+            pool,
+            case_id=case_id,
+            filename=file.filename or "upload",
+            sha256=sha256,
+            media_type=media_type,
+            bytes_=bytes_,
+            provenance_state=provenance_state,
+            summary=summary,
+            analysis_json=analysis_json,
+        )
+
+        return row
+
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+            
+@app.get("/cases/{case_id}/events")
+async def get_case_events(
+    case_id: str,
+    limit: int = 50,
+    pool=Depends(get_pool),
+    creds: HTTPAuthorizationCredentials | None = Depends(bearer),
+):
+    user = await require_user(pool, creds)
+
+    c = await db.get_case(pool, case_id=case_id, user_id=str(user["id"]))
+    if not c:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    return await db.list_case_events(pool, case_id=case_id, limit=limit)
+
+@app.post("/report")
+async def generate_report(
+    req: ReportReq,
+    pool=Depends(get_pool),
+    creds: HTTPAuthorizationCredentials | None = Depends(bearer),
+):
+    user = await require_user(pool, creds)
+
+    c = await db.get_case(pool, case_id=req.case_id, user_id=str(user["id"]))
+    if not c:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    evidence = await db.list_case_evidence(pool, req.case_id)
+
+    lines = []
+    lines.append(f"# TruthStamp Report")
+    lines.append("")
+    lines.append(f"## Case")
+    lines.append(f"- **Title:** {c.get('title')}")
+    lines.append(f"- **Description:** {c.get('description') or ''}")
+    lines.append("")
+    lines.append("## Evidence")
+    if not evidence:
+        lines.append("_No evidence uploaded yet._")
+    else:
+        for e in evidence:
+            lines.append(f"### {e.get('filename')}")
+            lines.append(f"- **SHA256:** {e.get('sha256')}")
+            lines.append(f"- **Type:** {e.get('media_type')}")
+            lines.append(f"- **Size:** {e.get('bytes')} bytes")
+            lines.append(f"- **Provenance:** {e.get('provenance_state')}")
+            lines.append(f"- **Summary:** {e.get('summary')}")
+            lines.append("")
+
+    report_md = "\n".join(lines)
+
+    return {
+        "ok": True,
+        "case_id": req.case_id,
+        "report_markdown": report_md,
+        "evidence_count": len(evidence),
+    }
