@@ -252,7 +252,10 @@ async def admin_send_temp_password(
         ),
         )
 
-    return {"ok": True, "email_sent": True}
+    return {"ok": True,
+    "temp_password": temp_password,
+    "email_sent": bool(sent),
+    "email_error": err,}
 
 
 

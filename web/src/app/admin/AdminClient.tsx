@@ -142,28 +142,60 @@ export default function AdminClient() {
       setMsg("Missing email for user.");
       return;
     }
+
     setLoading(true);
     setMsg("");
+
     try {
-      const out = await api<{ ok: boolean; temp_password?: string }>(
-        "/admin/users/send-temp-password",
+      const r = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL}/admin/users/send-temp-password`,
         {
           method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-admin-key": adminKey, // keep if your backend requires it
+          },
           body: JSON.stringify({ email }),
         }
       );
 
-      // In production you should NOT show temp password in UI.
-      // But for now, if SMTP isn’t configured, backend returns it so you can manually message the user.
-      if (out?.temp_password) {
-        setMsg(`Temp password generated for ${email}: ${out.temp_password}`);
-      } else {
-        setMsg(`Temp password email sent to ${email} (if SMTP configured).`);
+      const out: {
+        ok: boolean;
+        temp_password?: string;
+        email_sent?: boolean;
+        email_error?: string | null;
+      } = await r.json();
+
+      if (!out?.ok) {
+        setMsg("Failed to generate temp password.");
+        return;
       }
 
-      await refreshAll();
+      // Always show temp password + email status
+      if (out.temp_password) {
+        const baseMsg =
+          `Temp password for ${email}: ${out.temp_password}` +
+          (out.email_sent ? " (Email sent ✅)" : " (Email NOT sent ❌)");
+
+        setMsg(baseMsg);
+
+        // Auto-copy to clipboard
+        try {
+          await navigator.clipboard.writeText(out.temp_password);
+          setMsg(baseMsg + " — copied to clipboard ✅");
+        } catch {
+          // ignore clipboard permission failures
+        }
+
+        // Append backend email error if present
+        if (!out.email_sent && out.email_error) {
+          setMsg((prev: string) => prev + `\nEmail error: ${out.email_error}`);
+        }
+      } else {
+        setMsg("Temp password was generated but not returned by the API.");
+      }
     } catch (e: any) {
-      setMsg(e?.message || "Temp password failed");
+      setMsg(e?.message || "Request failed.");
     } finally {
       setLoading(false);
     }
