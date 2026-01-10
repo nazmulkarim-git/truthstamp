@@ -70,6 +70,25 @@ def require_admin(request: Request) -> None:
     got = request.headers.get(ADMIN_HEADER, "")
     if not expected or got != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
+    
+bearer = HTTPBearer(auto_error=False)
+JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
+JWT_ALG = "HS256"
+
+def get_user_id_from_token(creds: HTTPAuthorizationCredentials | None) -> str:
+    if not creds or not creds.credentials:
+        raise HTTPException(status_code=401, detail="Missing token")
+
+    try:
+        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALG])
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return str(user_id)
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 
 class EnableByEmail(BaseModel):
@@ -419,3 +438,11 @@ async def auth_change_password(
 
     await db.set_user_password(pool, str(user["id"]), req.new_password)
     return {"ok": True}
+
+@app.get("/cases")
+async def list_my_cases(
+    pool=Depends(get_pool),
+    creds: HTTPAuthorizationCredentials | None = Depends(bearer),
+):
+    user_id = get_user_id_from_token(creds)
+    return await db.list_cases(pool, user_id=user_id, limit=200)
