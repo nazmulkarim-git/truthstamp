@@ -434,3 +434,42 @@ async def list_cases(pool: asyncpg.Pool, user_id: Optional[str], limit: int = 20
                 limit,
             )
     return [dict(r) for r in rows]
+
+async def create_case(
+    pool: asyncpg.Pool,
+    *,
+    user_id: str,
+    title: str,
+    description: Optional[str] = None,
+) -> Dict[str, Any]:
+    async with pool.acquire() as con:
+        row = await con.fetchrow(
+            """
+            INSERT INTO cases (user_id, title, description)
+            VALUES ($1, $2, $3)
+            RETURNING id, user_id, title, description, status, created_at
+            """,
+            user_id,
+            title,
+            description,
+        )
+    return dict(row)
+
+
+async def get_case(
+    pool: asyncpg.Pool,
+    *,
+    case_id: str,
+    user_id: str,
+) -> Optional[Dict[str, Any]]:
+    async with pool.acquire() as con:
+        row = await con.fetchrow(
+            """
+            SELECT id, user_id, title, description, status, created_at
+            FROM cases
+            WHERE id = $1 AND user_id = $2
+            """,
+            case_id,
+            user_id,
+        )
+    return dict(row) if row else None

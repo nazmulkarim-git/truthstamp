@@ -120,6 +120,10 @@ class ChangePasswordReq(BaseModel):
     old_password: Optional[str] = None
     new_password: str
 
+class CreateCaseReq(BaseModel):
+    title: str
+    description: Optional[str] = None
+
 
 app = FastAPI(title="TruthStamp API", version="1.0.0")
 
@@ -446,3 +450,40 @@ async def list_my_cases(
 ):
     user_id = get_user_id_from_token(creds)
     return await db.list_cases(pool, user_id=user_id, limit=200)
+
+
+@app.get("/cases")
+async def my_cases(
+    pool=Depends(get_pool),
+    creds: HTTPAuthorizationCredentials | None = Depends(bearer),
+):
+    user = await require_user(pool, creds)
+    return await db.list_cases(pool, user_id=str(user["id"]), limit=200)
+
+
+@app.post("/cases")
+async def create_case(
+    req: CreateCaseReq,
+    pool=Depends(get_pool),
+    creds: HTTPAuthorizationCredentials | None = Depends(bearer),
+):
+    user = await require_user(pool, creds)
+    return await db.create_case(
+        pool,
+        user_id=str(user["id"]),
+        title=req.title,
+        description=req.description,
+    )
+
+
+@app.get("/cases/{case_id}")
+async def get_case(
+    case_id: str,
+    pool=Depends(get_pool),
+    creds: HTTPAuthorizationCredentials | None = Depends(bearer),
+):
+    user = await require_user(pool, creds)
+    c = await db.get_case(pool, case_id=case_id, user_id=str(user["id"]))
+    if not c:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return c
