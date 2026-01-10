@@ -162,7 +162,17 @@ def try_send_email(to_email: str, subject: str, body: str) -> tuple[bool, str | 
         import traceback
         print("SMTP ERROR:", repr(e))
         print(traceback.format_exc())
-        return False, str(e)
+
+    except Exception as e:
+        import traceback
+        print("SMTP ERROR:", repr(e))
+        print(traceback.format_exc())
+
+        # Fallback to Resend (HTTPS) when SMTP is blocked
+        sent2, err2 = try_send_email_resend(to_email, subject, body)
+        if sent2:
+            return True, None
+        return False, f"SMTP failed: {e}; Resend failed: {err2}"
     
 def try_send_email_http(to_email: str, subject: str, body: str) -> tuple[bool, str | None]:
     api_key = os.getenv("RESEND_API_KEY", "").strip()
@@ -189,7 +199,34 @@ def try_send_email_http(to_email: str, subject: str, body: str) -> tuple[bool, s
     except Exception as e:
         return False, str(e)
 
+def try_send_email_resend(to_email: str, subject: str, body: str) -> tuple[bool, str | None]:
+    api_key = os.getenv("RESEND_API_KEY", "").strip()
+    from_addr = os.getenv("SMTP_FROM", "TruthStamp <onboarding@resend.dev>").strip()
 
+    if not api_key:
+        return False, "Missing RESEND_API_KEY"
+
+    try:
+        r = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "from": from_addr,
+                "to": [to_email],
+                "subject": subject,
+                "text": body,
+            },
+            timeout=20,
+        )
+        if r.status_code >= 400:
+            return False, f"Resend error {r.status_code}: {r.text}"
+        return True, None
+    except Exception as e:
+        return False, str(e)
+    
 # -----------------------
 # Users
 # -----------------------
