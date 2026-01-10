@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { apiFetch, apiJson } from "@/lib/api";
+import { useToast } from "@/components/ui/use-toast";
 
 type Case = {
   id: string;
@@ -37,14 +38,14 @@ type Event = {
 
 export default function CasePage() {
   const params = useParams<{ id: string }>();
-  const caseId = params?.id as string;
+  body: JSON.stringify({ case_id: caseId })
 
   const [caze, setCase] = useState<Case | null>(null);
   const [evidence, setEvidence] = useState<Evidence[]>([]);
   const [events, setEvents] = useState<Event[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-
+  const { toast } = useToast();
   const [file, setFile] = useState<File | null>(null);
 
   async function refresh() {
@@ -96,32 +97,37 @@ export default function CasePage() {
 }
 
   async function generateReport() {
+    setErr(null);
+    setBusyReport(true);
     try {
-      setBusy(true);
-
-      // IMPORTANT: /report expects JSON, not FormData
       const res = await apiFetch("/report", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ case_id: id }),
+        body: JSON.stringify({ case_id: caseId }), // ✅ use caseId (NOT id)
       });
 
       if (!res.ok) throw new Error(await res.text());
 
-      // Expecting PDF stream from backend
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
-
       const a = document.createElement("a");
       a.href = url;
-      a.download = `truthstamp-report-${id}.pdf`;
+      a.download = `truthstamp-report-${caseId}.pdf`;
       document.body.appendChild(a);
       a.click();
       a.remove();
-
       URL.revokeObjectURL(url);
+
+      toast({ title: "Report downloaded" });
+    } catch (e: any) {
+      toast({
+        title: "Report failed",
+        description: e?.message || "Failed",
+        variant: "destructive",
+      });
+      setErr(e?.message || "Report failed");
     } finally {
-      setBusy(false);
+      setBusyReport(false);
     }
   }
 
