@@ -5,7 +5,7 @@ import secrets
 import string
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
-
+import json
 import asyncpg
 from passlib.context import CryptContext
 import smtplib
@@ -229,6 +229,67 @@ async def set_user_temp_password(pool: asyncpg.Pool, user_id: str, temp_password
             """,
             user_id,
             ph,
+        )
+
+async def get_user_by_id(pool: asyncpg.Pool, user_id: str) -> Optional[Dict[str, Any]]:
+    async with pool.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM users WHERE id=$1", user_id)
+    return dict(row) if row else None
+
+
+async def create_user_request(
+    pool: asyncpg.Pool,
+    *,
+    name: str,
+    email: str,
+    phone: str | None,
+    occupation: str | None,
+    company: str | None,
+    extras: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """
+    Creates a user in 'pending approval' state.
+    Because schema requires password_hash NOT NULL, we store a random placeholder hash.
+    Admin will later approve + send a temp password via /admin/users/send-temp-password.
+    """
+    email_l = email.lower().strip()
+
+    # placeholder password (never shown to user)
+    placeholder = generate_temp_password()
+    phash = hash_password(placeholder)
+
+    extras = extras or {}
+
+    async with pool.acquire() as con:
+        row = await con.fetchrow(
+            """
+            INSERT INTO users (name, email, phone, occupation, company, extras, password_hash, is_active, is_approved, must_change_password)
+            VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7, TRUE, FALSE, TRUE)
+            RETURNING *
+            """,
+            name.strip() if name else None,
+            email_l,
+            phone,
+            occupation,
+            company,
+            json.dumps(extras),
+            phash,
+        )
+    return dict(row)
+
+
+async def set_user_password(pool: asyncpg.Pool, user_id: str, new_password: str) -> None:
+    new_hash = hash_password(new_password)
+    async with pool.acquire() as con:
+        await con.execute(
+            """
+            UPDATE users
+            SET password_hash=$2,
+                must_change_password=FALSE
+            WHERE id=$1
+            """,
+            user_id,
+            new_hash,
         )
 
 
