@@ -96,38 +96,30 @@ export default function CasePage() {
 }
 
   async function generateReport() {
-    setBusy(true);
     try {
+      setBusy(true);
+
+      // IMPORTANT: /report expects JSON, not FormData
       const res = await apiFetch("/report", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/pdf",
-        },
-        body: JSON.stringify({ case_id: caseId }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ case_id: id }),
       });
 
-      if (!res.ok) {
-        // show useful error message (backend returns JSON detail on 4xx)
-        const txt = await res.text();
-        throw new Error(txt || `HTTP ${res.status}`);
-      }
+      if (!res.ok) throw new Error(await res.text());
 
+      // Expecting PDF stream from backend
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
+
       const a = document.createElement("a");
       a.href = url;
-      a.download = `truthstamp_report_${caseId}.pdf`;
+      a.download = `truthstamp-report-${id}.pdf`;
+      document.body.appendChild(a);
       a.click();
-      URL.revokeObjectURL(url);
+      a.remove();
 
-      toast({ title: "Report downloaded" });
-    } catch (e: any) {
-      toast({
-        title: "Report failed",
-        description: e?.message?.slice(0, 300) || "Unknown error",
-        variant: "destructive",
-      });
+      URL.revokeObjectURL(url);
     } finally {
       setBusy(false);
     }
