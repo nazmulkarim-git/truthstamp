@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import secrets
 import string
+import uuid
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 import json
@@ -260,13 +261,19 @@ async def create_user_request(
 
     extras = extras or {}
 
+    user_id = uuid.uuid4()
+
     async with pool.acquire() as con:
         row = await con.fetchrow(
             """
-            INSERT INTO users (name, email, phone, occupation, company, extras, password_hash, is_active, is_approved, must_change_password)
-            VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7, TRUE, FALSE, TRUE)
+            INSERT INTO users (
+                id, name, email, phone, occupation, company, extras,
+                password_hash, is_active, is_approved, must_change_password
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8, TRUE, FALSE, TRUE)
             RETURNING *
             """,
+            user_id,
             name.strip() if name else None,
             email_l,
             phone,

@@ -106,12 +106,24 @@ app = FastAPI(title="TruthStamp API", version="1.0.0")
 
 
 # CORS
-cors_origins = os.getenv("CORS_ORIGINS", "")
-origins = [o.strip() for o in cors_origins.split(",") if o.strip()] or ["*"]
+cors_origins = os.getenv("CORS_ORIGINS", "").strip()
+
+if cors_origins:
+    origins = [o.strip() for o in cors_origins.split(",") if o.strip()]
+    allow_credentials = True
+else:
+    # Safe defaults when env not set (no wildcard with credentials)
+    origins = [
+        "https://truthstamp-web.onrender.com",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+    allow_credentials = False  # because we are not using cookies
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=True,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
