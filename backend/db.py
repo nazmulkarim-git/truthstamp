@@ -128,18 +128,18 @@ def generate_temp_password(length: int = 12) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
-async def try_send_email(to_email: str, subject: str, body: str) -> bool:
+def try_send_email(to_email: str, subject: str, body: str) -> tuple[bool, str | None]:
     """
-    Returns True if email was sent, False if SMTP is not configured.
+    Returns (sent, error). Never raises.
     """
     host = os.getenv("SMTP_HOST", "").strip()
     user = os.getenv("SMTP_USER", "").strip()
-    passwd = os.getenv("SMTP_PASS", "").strip()
+    passwd = os.getenv("SMTP_PASS", "").strip().replace(" ", "")  # IMPORTANT: remove spaces
     from_addr = os.getenv("SMTP_FROM", "TruthStamp <no-reply@truthstamp.local>").strip()
     port = int(os.getenv("SMTP_PORT", "587"))
 
     if not host or not user or not passwd:
-        return False
+        return False, "SMTP is not configured (missing SMTP_HOST/SMTP_USER/SMTP_PASS)"
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -148,14 +148,20 @@ async def try_send_email(to_email: str, subject: str, body: str) -> bool:
     msg.set_content(body)
 
     try:
-        with smtplib.SMTP(host, port) as server:
+        with smtplib.SMTP(host, port, timeout=20) as server:
+            server.ehlo()
+            # Gmail on 587 uses STARTTLS
             server.starttls()
+            server.ehlo()
             server.login(user, passwd)
             server.send_message(msg)
-        return True
-    except Exception:
-        # don’t crash the API because SMTP failed
-        return False
+        return True, None
+    except Exception as e:
+        # LOG the actual error so you can see it in Render logs
+        import traceback
+        print("SMTP ERROR:", repr(e))
+        print(traceback.format_exc())
+        return False, str(e)
 
 
 # -----------------------
