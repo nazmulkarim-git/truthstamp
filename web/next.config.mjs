@@ -1,5 +1,13 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: "standalone",
+  async rewrites() {
+    return [
+      {
+        source: "/api/:path*",
+        destination: "https://truthstamp-api.onrender.com/:path*",
+      },
+    ];
+  },
 };
+
 export default nextConfig;

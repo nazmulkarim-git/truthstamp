@@ -1,6 +1,6 @@
 import { authHeaders, clearToken } from "./auth";
 
-export const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:10000";
+export const API_URL = process.env.NEXT_PUBLIC_API_URL || "/api";
 
 export async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   const url = path.startsWith("http") ? path : `${API}${path}`;

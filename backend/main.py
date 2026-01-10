@@ -11,6 +11,9 @@ from pydantic import BaseModel, EmailStr
 from backend import db, engine
 from backend.utils import sha256_file
 import jwt
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
 
 ADMIN_HEADER = "x-admin-key"
 
@@ -284,7 +287,28 @@ async def admin_send_temp_password(
     "email_error": err,}
 
 
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
+    # FastAPI's default handler can crash if `exc.errors()` contains raw bytes (e.g., multipart body)
+    safe_errors = []
+    for e in exc.errors():
+        e2 = dict(e)
+        # "input" can be bytes when body isn't JSON; make it JSON-safe
+        if isinstance(e2.get("input"), (bytes, bytearray)):
+            e2["input"] = "<binary body omitted>"
+        safe_errors.append(e2)
 
+    # Optional: give a helpful hint when someone uploads a file to /report
+    if request.url.path == "/report":
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": safe_errors,
+                "hint": "POST /report expects JSON like {'case_id': '...'}; upload files to POST /cases/{case_id}/evidence as multipart/form-data with field name 'file'."
+            },
+        )
+
+    return JSONResponse(status_code=422, content={"detail": safe_errors})
 
 # -----------------------
 # (Optional) Auth endpoints
