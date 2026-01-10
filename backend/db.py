@@ -115,6 +115,27 @@ async def init_db(pool: asyncpg.Pool) -> None:
             """
         )
 
+        await con.execute(
+            """
+            -- If your id is UUID type, set a default UUID generator when possible
+            -- This may fail if extension isn't available, but that's okay.
+            DO $$
+            BEGIN
+            BEGIN
+                CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+            EXCEPTION WHEN OTHERS THEN
+                -- ignore
+            END;
+
+            BEGIN
+                ALTER TABLE cases ALTER COLUMN id SET DEFAULT uuid_generate_v4();
+            EXCEPTION WHEN OTHERS THEN
+                -- ignore
+            END;
+            END $$;
+            """
+        )
+
 
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
@@ -442,16 +463,21 @@ async def create_case(
     title: str,
     description: Optional[str] = None,
 ) -> Dict[str, Any]:
+    case_id = uuid.uuid4()
+    created_at = datetime.now(timezone.utc)
+
     async with pool.acquire() as con:
         row = await con.fetchrow(
             """
-            INSERT INTO cases (user_id, title, description)
-            VALUES ($1, $2, $3)
+            INSERT INTO cases (id, user_id, title, description, status, created_at)
+            VALUES ($1, $2, $3, $4, 'open', $5)
             RETURNING id, user_id, title, description, status, created_at
             """,
+            case_id,
             user_id,
             title,
             description,
+            created_at,
         )
     return dict(row)
 
