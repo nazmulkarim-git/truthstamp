@@ -228,7 +228,20 @@ async def admin_send_temp_password(
     await db.set_user_temp_password(pool, user_id=user["id"], temp_password=temp_password)
 
     # Try email (optional)
-    sent = await db.try_send_email(
+    sent, err = db.try_send_email(
+    to_email=req.email,
+    subject="TruthStamp: Your temporary password",
+    body=(
+        "Your TruthStamp account has a temporary password.\n\n"
+        f"Email: {req.email}\n"
+        f"Temporary password: {temp_password}\n\n"
+        "Please log in and change your password immediately.\n"
+    ),
+    )
+
+    if not sent:
+        # IMPORTANT: don't crash; return temp password + error so admin can act
+        sent, err = db.try_send_email_http(
         to_email=req.email,
         subject="TruthStamp: Your temporary password",
         body=(
@@ -237,13 +250,11 @@ async def admin_send_temp_password(
             f"Temporary password: {temp_password}\n\n"
             "Please log in and change your password immediately.\n"
         ),
-    )
+        )
 
-    # If SMTP isn’t configured, we return it so you can manually send
-    if not sent:
-        return {"ok": True, "temp_password": temp_password}
+    return {"ok": True, "email_sent": True}
 
-    return {"ok": True}
+
 
 
 # -----------------------

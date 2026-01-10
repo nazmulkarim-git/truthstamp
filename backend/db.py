@@ -4,6 +4,7 @@ import os
 import secrets
 import string
 import uuid
+import requests
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 import json
@@ -161,6 +162,31 @@ def try_send_email(to_email: str, subject: str, body: str) -> tuple[bool, str | 
         import traceback
         print("SMTP ERROR:", repr(e))
         print(traceback.format_exc())
+        return False, str(e)
+    
+def try_send_email_http(to_email: str, subject: str, body: str) -> tuple[bool, str | None]:
+    api_key = os.getenv("RESEND_API_KEY", "").strip()
+    from_addr = os.getenv("SMTP_FROM", "TruthStamp <onboarding@resend.dev>").strip()
+
+    if not api_key:
+        return False, "Missing RESEND_API_KEY"
+
+    try:
+        r = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "from": from_addr,
+                "to": [to_email],
+                "subject": subject,
+                "text": body,
+            },
+            timeout=20,
+        )
+        if r.status_code >= 400:
+            return False, f"Resend error {r.status_code}: {r.text}"
+        return True, None
+    except Exception as e:
         return False, str(e)
 
 
