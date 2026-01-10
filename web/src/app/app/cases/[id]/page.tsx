@@ -96,28 +96,38 @@ export default function CasePage() {
 }
 
   async function generateReport() {
-    if (!file) return;
     setBusy(true);
-    setErr(null);
     try {
-      const fd = new FormData();
-      fd.append("file", file);
+      const res = await apiFetch("/report", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/pdf",
+        },
+        body: JSON.stringify({ case_id: caseId }),
+      });
 
-      const res = await apiFetch("/report", { method: "POST", body: fd });
       if (!res.ok) {
-        const t = await res.text().catch(() => "");
-        throw new Error(t || "Report failed");
+        // show useful error message (backend returns JSON detail on 4xx)
+        const txt = await res.text();
+        throw new Error(txt || `HTTP ${res.status}`);
       }
+
       const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
+      const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `truthstamp-report-${caseId}.pdf`;
+      a.download = `truthstamp_report_${caseId}.pdf`;
       a.click();
-      window.URL.revokeObjectURL(url);
-      await refresh();
+      URL.revokeObjectURL(url);
+
+      toast({ title: "Report downloaded" });
     } catch (e: any) {
-      setErr(e?.message || "Failed");
+      toast({
+        title: "Report failed",
+        description: e?.message?.slice(0, 300) || "Unknown error",
+        variant: "destructive",
+      });
     } finally {
       setBusy(false);
     }
@@ -202,8 +212,8 @@ export default function CasePage() {
                   <Button disabled={!file || busy} onClick={uploadAndAnalyze} className="bg-blue-600 hover:bg-blue-700">
                     {busy ? "Working…" : "Add to case + Analyze"}
                   </Button>
-                  <Button disabled={!file || busy} onClick={generateReport} variant="outline">
-                    Generate PDF (requires login)
+                  <Button disabled={busy} onClick={generateReport} variant="outline">
+                    Generate Report
                   </Button>
                 </div>
 
