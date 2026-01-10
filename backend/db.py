@@ -102,6 +102,18 @@ async def init_db(pool: asyncpg.Pool) -> None:
             """
         )
 
+        await con.execute(
+            """
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS requested_at TIMESTAMPTZ;
+            ALTER TABLE users
+            ALTER COLUMN requested_at SET DEFAULT now();
+            UPDATE users SET requested_at = now() WHERE requested_at IS NULL;
+            ALTER TABLE users
+            ALTER COLUMN requested_at SET NOT NULL;
+            """
+        )
+
 
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
@@ -248,11 +260,6 @@ async def create_user_request(
     company: str | None,
     extras: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    """
-    Creates a user in 'pending approval' state.
-    Because schema requires password_hash NOT NULL, we store a random placeholder hash.
-    Admin will later approve + send a temp password via /admin/users/send-temp-password.
-    """
     email_l = email.lower().strip()
 
     # placeholder password (never shown to user)
@@ -260,17 +267,22 @@ async def create_user_request(
     phash = hash_password(placeholder)
 
     extras = extras or {}
-
     user_id = uuid.uuid4()
+    requested_at = datetime.now(timezone.utc)
 
     async with pool.acquire() as con:
         row = await con.fetchrow(
             """
             INSERT INTO users (
                 id, name, email, phone, occupation, company, extras,
-                password_hash, is_active, is_approved, must_change_password
+                password_hash, is_active, is_approved, must_change_password,
+                requested_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8, TRUE, FALSE, TRUE)
+            VALUES (
+                $1,$2,$3,$4,$5,$6,$7::jsonb,
+                $8, TRUE, FALSE, TRUE,
+                $9
+            )
             RETURNING *
             """,
             user_id,
@@ -281,6 +293,7 @@ async def create_user_request(
             company,
             json.dumps(extras),
             phash,
+            requested_at,
         )
     return dict(row)
 
