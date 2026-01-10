@@ -67,27 +67,33 @@ export default function CasePage() {
   }, [caseId]);
 
   async function uploadAndAnalyze() {
-    if (!file) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("case_id", caseId);
+  if (!file) return;
+  setBusy(true);
+  setErr(null);
 
-      const res = await apiFetch("/analyze", { method: "POST", body: fd });
-      if (!res.ok) {
-        const t = await res.text().catch(() => "");
-        throw new Error(t || "Analyze failed");
-      }
-      await refresh();
-      setFile(null);
-    } catch (e: any) {
-      setErr(e?.message || "Failed");
-    } finally {
-      setBusy(false);
+  try {
+    const fd = new FormData();
+    fd.append("file", file);
+
+    // IMPORTANT: call the case evidence endpoint (this stores to DB)
+    const res = await apiFetch(`/cases/${caseId}/evidence`, {
+      method: "POST",
+      body: fd,
+    });
+
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      throw new Error(t || "Upload + Analyze failed");
     }
+
+    await refresh();   // reload case + evidence + events
+    setFile(null);
+  } catch (e: any) {
+    setErr(e?.message || "Failed");
+  } finally {
+    setBusy(false);
   }
+}
 
   async function generateReport() {
     if (!file) return;
@@ -96,7 +102,6 @@ export default function CasePage() {
     try {
       const fd = new FormData();
       fd.append("file", file);
-      fd.append("case_id", caseId);
 
       const res = await apiFetch("/report", { method: "POST", body: fd });
       if (!res.ok) {

@@ -556,25 +556,16 @@ async def insert_evidence(
 
 
 async def list_case_events(pool: asyncpg.Pool, case_id: str, limit: int = 50):
-    """
-    You don't have an events table, so we derive a basic timeline from evidence.
-    This keeps the UI unbroken and still useful.
-    """
     evidence = await list_case_evidence(pool, case_id)
+
     events = []
     for e in evidence[:limit]:
         events.append(
             {
-                "type": "evidence_added",
-                "at": e["created_at"],
-                "title": f"Evidence uploaded: {e['filename']}",
-                "meta": {
-                    "evidence_id": str(e["id"]),
-                    "sha256": e["sha256"],
-                    "media_type": e["media_type"],
-                    "bytes": e["bytes"],
-                    "provenance_state": e["provenance_state"],
-                },
+                "id": str(e["id"]),                      # use evidence id
+                "event_type": "evidence_added",
+                "actor": "user",
+                "created_at": e["created_at"],
             }
         )
     return events
